@@ -29,6 +29,11 @@ struct ShaderHolder
     CShader RGBX;
     CShader EXT;
 
+    // Holds the background color
+    GLint BKGA;
+    GLint BKGX;
+    GLint BKGE;
+
     void Init();
     void Destroy();
 

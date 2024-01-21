@@ -2,7 +2,6 @@
 
 #include <hyprland/src/SharedDefs.hpp>
 
-
 inline HANDLE PHANDLE = nullptr;
 
 inline WindowInverter g_WindowInverter;
@@ -10,7 +9,6 @@ inline std::mutex g_InverterMutex;
 
 inline CFunctionHook* g_SetConfigValueHook;
 inline std::vector<SWindowRule> g_WindowRulesBuildup;
-
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 {
@@ -26,6 +24,25 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
         handle, "darkwindow_invert",
         [&](const std::string& cmd, const std::string& val) {
             g_WindowRulesBuildup.push_back(ParseRule(val));
+        }
+    );
+
+    HyprlandAPI::addConfigKeyword(
+        handle, "chroma_background",
+        [&](const std::string& cmd, const std::string& val) {
+            // Parse val as "r,g,b" into 3 GLfloats
+            std::vector<std::string> result;
+            std::stringstream ss (val);
+            std::string component;
+
+            getline(ss, component, ',');
+            GLfloat r = std::stof(component);
+            getline(ss, component, ',');
+            GLfloat g = std::stof(component);
+            getline(ss, component, ',');
+            GLfloat b = std::stof(component);
+
+            g_WindowInverter.SetBackground(r, g, b);
         }
     );
 

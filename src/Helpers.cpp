@@ -100,6 +100,7 @@ void ShaderHolder::Init()
     RGBA.radius               = glGetUniformLocation(prog, "radius");
     RGBA.applyTint            = glGetUniformLocation(prog, "applyTint");
     RGBA.tint                 = glGetUniformLocation(prog, "tint");
+    BKGA = glGetUniformLocation(prog, "bkg");
 
     prog                      = CreateProgram(TEXVERTSRC, TEXFRAGSRCRGBX_DARK);
     RGBX.program              = prog;
@@ -116,6 +117,7 @@ void ShaderHolder::Init()
     RGBX.radius               = glGetUniformLocation(prog, "radius");
     RGBX.applyTint            = glGetUniformLocation(prog, "applyTint");
     RGBX.tint                 = glGetUniformLocation(prog, "tint");
+    BKGX = glGetUniformLocation(prog, "bkg");
 
     prog                     = CreateProgram(TEXVERTSRC, TEXFRAGSRCEXT_DARK);
     EXT.program              = prog;
@@ -132,6 +134,7 @@ void ShaderHolder::Init()
     EXT.radius               = glGetUniformLocation(prog, "radius");
     EXT.applyTint            = glGetUniformLocation(prog, "applyTint");
     EXT.tint                 = glGetUniformLocation(prog, "tint");
+    BKGE = glGetUniformLocation(prog, "bkg");
 
     RASSERT(eglMakeCurrent(wlr_egl_get_display(g_pCompositor->m_sWLREGL), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT),
         "Couldn't unset current EGL!");

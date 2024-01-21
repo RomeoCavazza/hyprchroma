@@ -8,16 +8,31 @@
 
 inline static constexpr auto DARK_MODE_FUNC = [](const std::string colorVarName) -> std::string {
     return std::format(R"glsl(
-        // Invert Colors
-        {0}.rgb = vec3(1.) - vec3(.88, .9, .92) * {0}.rgb;
-        // if (v_texcoord.y > 0.5)
-        //     pixColor.rgb = vec3(1) - pixColor.rgb;
-        // else
-        //     pixColor = vec4(pixColor.a, 0, 0, 0.5);
+	// Original shader by ikz87
 
-        // Invert Hue
-        {0}.rgb = -{0}.rgb + dot(vec3(0.26312, 0.5283, 0.10488), {0}.rgb) * 2.0;
+	// Apply opacity changes to pixels similar to one color
+	// vec3 color_rgb = vec3(0,0,255); // Color to replace, in rgb format
+	float similarity = 0.1; // How many similar colors should be affected.
 
+	float amount = 1.4; // How much similar colors should be changed.
+	float target_opacity = 0.83;
+	// Change any of the above values to get the result you want
+
+	// Set values to a 0 - 1 range
+	vec3 chroma = vec3(bkg[0]/255.0, bkg[1]/255.0, bkg[2]/255.0);
+
+	if ({0}.x >=chroma.x - similarity && {0}.x <=chroma.x + similarity &&
+            {0}.y >=chroma.y - similarity && {0}.y <=chroma.y + similarity &&
+            {0}.z >=chroma.z - similarity && {0}.z <=chroma.z + similarity &&
+            {0}.w >= 0.99)
+	{{
+	    // Calculate error between matched pixel and color_rgb values
+            vec3 error = vec3(abs(chroma.x - {0}.x), abs(chroma.y - {0}.y), abs(chroma.z - {0}.z));
+	    float avg_error = (error.x + error.y + error.z) / 3.0;
+            {0}.w = target_opacity + (1.0 - target_opacity)*avg_error*amount/similarity;
+
+	    // {0}.rgba = vec4(0, 0, 1, 0.5);
+	}}
     )glsl", colorVarName);
 };
 
@@ -39,17 +54,19 @@ uniform float discardAlphaValue;
 uniform int applyTint;
 uniform vec3 tint;
 
+uniform vec3 bkg;
+
 void main() {
 
     vec4 pixColor = texture2D(tex, v_texcoord);
 
     if (discardOpaque == 1 && pixColor[3] * alpha == 1.0)
 	    discard;
-    
+
     if (discardAlpha == 1 && pixColor[3] <= discardAlphaValue)
         discard;
 
-    if (applyTint == 1) {
+    if (applyTint == 2) {
 	    pixColor[0] = pixColor[0] * tint[0];
 	    pixColor[1] = pixColor[1] * tint[1];
 	    pixColor[2] = pixColor[2] * tint[2];
@@ -82,6 +99,8 @@ uniform int discardAlphaValue;
 uniform int applyTint;
 uniform vec3 tint;
 
+uniform vec3 bkg;
+
 void main() {
 
     if (discardOpaque == 1 && alpha == 1.0)
@@ -89,7 +108,7 @@ void main() {
 
     vec4 pixColor = vec4(texture2D(tex, v_texcoord).rgb, 1.0);
 
-    if (applyTint == 1) {
+    if (applyTint == 2) {
 	pixColor[0] = pixColor[0] * tint[0];
 	pixColor[1] = pixColor[1] * tint[1];
 	pixColor[2] = pixColor[2] * tint[2];
@@ -124,6 +143,8 @@ uniform int discardAlphaValue;
 uniform int applyTint;
 uniform vec3 tint;
 
+uniform vec3 bkg;
+
 void main() {
 
     vec4 pixColor = texture2D(texture0, v_texcoord);
@@ -131,7 +152,7 @@ void main() {
     if (discardOpaque == 1 && pixColor[3] * alpha == 1.0)
         discard;
 
-    if (applyTint == 1) {
+    if (applyTint == 2) {
 	pixColor[0] = pixColor[0] * tint[0];
 	pixColor[1] = pixColor[1] * tint[1];
 	pixColor[2] = pixColor[2] * tint[2];
