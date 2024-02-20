@@ -1,6 +1,6 @@
-[Hypr-DarkWindow]
-description = "Invert the colors of specific Windows"
-authors = ["micha4w"]
+[Hypr-Chroma]
+description = "Apply Chromakey algorithm"
+authors = ["alexhulbert"]
 output = "out/hypr-darkwindow.so"
 build = [
     "make all",
