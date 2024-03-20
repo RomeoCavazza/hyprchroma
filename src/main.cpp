@@ -44,7 +44,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 
     HyprlandAPI::addConfigKeyword(
         handle, "chroma_background",
-        [&](const std::string& cmd, const std::string& val) {
+        [](const char* cmd, const char* val) -> Hyprlang::CParseResult {
             // Parse val as "r,g,b" into 3 GLfloats
             std::vector<std::string> result;
             std::stringstream ss (val);
@@ -58,7 +58,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
             GLfloat b = std::stof(component);
 
             g_WindowInverter.SetBackground(r, g, b);
-        }
+
+            return Hyprlang::CParseResult(); // return a default CParseResult
+        },
+        { .allowFlags = false }
     );
 
     HyprlandAPI::registerCallbackDynamic(
