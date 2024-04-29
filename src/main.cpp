@@ -37,13 +37,13 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
     using PCONFIGHANDLERFUNC = Hyprlang::CParseResult(*)(const char* COMMAND, const char* VALUE);
 
     HyprlandAPI::addConfigKeyword(
-        handle, "darkwindow_invert",
+        handle, "chromakey_enable",
         onInvertKeyword,
         { .allowFlags = false }
     );
 
     HyprlandAPI::addConfigKeyword(
-        handle, "chroma_background",
+        handle, "chromakey_background",
         [](const char* cmd, const char* val) -> Hyprlang::CParseResult {
             // Parse val as "r,g,b" into 3 GLfloats
             std::vector<std::string> result;
@@ -125,9 +125,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
     });
 
     return {
-        "hypr-darkwindow",
-        "Allows you to set dark mode for only specific Windows",
-        "micha4w",
+        "hyprchroma",
+        "Applies ChromaKey algorithm to windows for transparency effect",
+        "alexhulbert",
         "1.0.0"
     };
 }
