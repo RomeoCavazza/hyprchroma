@@ -8,4 +8,5 @@ build = [
 commit_pins = [
     # v Hyprland                                  v hyprchroma
     ["fe7b748eb668136dd0558b7c8279bfcd7ab4d759", "2629145e163f16b525bd5a3f310837e146c38e9f"], # v0.39.1
+    ["cba1ade848feac44b2eda677503900639581c3f4", "64e0dd68b58c4334b96eca999bfaf51c0d86218a"], # v0.40.0
 ]
