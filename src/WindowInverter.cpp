@@ -10,10 +10,10 @@ void WindowInverter::SetBackground(GLfloat r, GLfloat g, GLfloat b)
 void WindowInverter::OnRenderWindowPre()
 {
     bool shouldInvert =
-        std::find(m_InvertedWindows.begin(), m_InvertedWindows.end(), g_pHyprOpenGL->m_pCurrentWindow)
-            != m_InvertedWindows.end() ||
-        std::find(m_ManuallyInvertedWindows.begin(), m_ManuallyInvertedWindows.end(), g_pHyprOpenGL->m_pCurrentWindow)
-            != m_ManuallyInvertedWindows.end();
+        (std::find(m_InvertedWindows.begin(), m_InvertedWindows.end(), g_pHyprOpenGL->m_pCurrentWindow.lock())
+            != m_InvertedWindows.end()) ^
+        (std::find(m_ManuallyInvertedWindows.begin(), m_ManuallyInvertedWindows.end(), g_pHyprOpenGL->m_pCurrentWindow.lock())
+            != m_ManuallyInvertedWindows.end());
 
     if (shouldInvert)
     {
@@ -41,7 +41,7 @@ void WindowInverter::OnRenderWindowPost()
     }
 }
 
-void WindowInverter::OnWindowClose(CWindow* window)
+void WindowInverter::OnWindowClose(PHLWINDOW window)
 {
     auto windowIt = std::find(m_InvertedWindows.begin(), m_InvertedWindows.end(), window);
     if (windowIt != m_InvertedWindows.end())
@@ -84,16 +84,18 @@ void WindowInverter::Unload()
     m_Shaders.Destroy();
 }
 
-void WindowInverter::InvertIfMatches(CWindow* window)
+void WindowInverter::InvertIfMatches(PHLWINDOW window)
 {
-    std::string              title      = g_pXWaylandManager->getTitle(window);
+    // for some reason, some events (currently `activeWindow`) sometimes pass a null pointer
+    if (!window) return;
+
+    std::string              title = g_pXWaylandManager->getTitle(window);
     std::string              appidclass = g_pXWaylandManager->getAppIDClass(window);
 
     bool shouldInvert = false;
     for (const auto& rule : m_InvertWindowRules)
     {
-        try
-        {
+        try {
             if (rule.szClass != "") {
                 std::regex RULECHECK(rule.szClass);
 
@@ -105,6 +107,20 @@ void WindowInverter::InvertIfMatches(CWindow* window)
                 std::regex RULECHECK(rule.szTitle);
 
                 if (!std::regex_search(title, RULECHECK))
+                    continue;
+            }
+
+            if (rule.szInitialTitle != "") {
+                std::regex RULECHECK(rule.szInitialTitle);
+
+                if (!std::regex_search(window->m_szInitialTitle, RULECHECK))
+                    continue;
+            }
+
+            if (rule.szInitialClass != "") {
+                std::regex RULECHECK(rule.szInitialClass);
+
+                if (!std::regex_search(window->m_szInitialClass, RULECHECK))
                     continue;
             }
 
@@ -128,16 +144,28 @@ void WindowInverter::InvertIfMatches(CWindow* window)
                     continue;
             }
 
+            if (rule.bFocus != -1) {
+                if (rule.bFocus != (g_pCompositor->m_pLastWindow.lock() == window))
+                    continue;
+            }
+
+            if (!rule.szOnWorkspace.empty()) {
+                const auto PWORKSPACE = window->m_pWorkspace;
+                if (!PWORKSPACE || !PWORKSPACE->matchesStaticSelector(rule.szOnWorkspace))
+                    continue;
+            }
+
             if (!rule.szWorkspace.empty()) {
                 const auto PWORKSPACE = window->m_pWorkspace;
 
                 if (!PWORKSPACE)
                     continue;
 
-                if (rule.szWorkspace.find("name:") == 0) {
+                if (rule.szWorkspace.starts_with("name:")) {
                     if (PWORKSPACE->m_szName != rule.szWorkspace.substr(5))
                         continue;
-                } else {
+                }
+                else {
                     // number
                     if (!isNumber(rule.szWorkspace))
                         throw std::runtime_error("szWorkspace not name: or number");
@@ -149,9 +177,8 @@ void WindowInverter::InvertIfMatches(CWindow* window)
                 }
             }
         }
-        catch (std::exception& e)
-        {
-            Debug::log(ERR, "Regex error at %s (%s)", rule.szValue.c_str(), e.what());
+        catch (std::exception& e) {
+            Debug::log(ERR, "Regex error at {} ({})", rule.szValue, e.what());
             continue;
         }
 
@@ -175,7 +202,7 @@ void WindowInverter::InvertIfMatches(CWindow* window)
 }
 
 
-void WindowInverter::ToggleInvert(CWindow* window)
+void WindowInverter::ToggleInvert(PHLWINDOW window)
 {
     if (!window)
         return;
@@ -198,5 +225,5 @@ void WindowInverter::Reload()
     m_InvertedWindows = {};
 
     for (const auto& window : g_pCompositor->m_vWindows)
-        InvertIfMatches(window.get());
+        InvertIfMatches(window);
 }
