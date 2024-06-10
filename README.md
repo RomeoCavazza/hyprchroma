@@ -1,17 +1,14 @@
-# hypr-darkwindow
-Hyprland plugin that adds possibility to invert the color of specific windows.
-
-![preview](./res/preview.png)
+# hypr-chrome
+Hyprland plugin that applies a chromakey effect for global window background transparency without affecting readability
 
 ## Configuration
-This Branch adds config, that uses the rulev2 syntax:
 ```conf
 # hyprland.conf
-darkwindow_invert = class:(pb170.exe)
-darkwindow_invert = fullscreen:1
+chromakey_enable = fullscreen:0
+chromakey_background = rgb(07121b)
 ```
 
-Also adds 2 Dispatches `invertwindow WINDOW` and `invertactivewindow`
+Also adds 2 Dispatches `togglewindowchromakey WINDOW` and `togglechromakey` (for the active window)
 
 ## Installation
 
