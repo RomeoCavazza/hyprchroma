@@ -9,4 +9,5 @@ commit_pins = [
     # v Hyprland                                  v hyprchroma
     ["fe7b748eb668136dd0558b7c8279bfcd7ab4d759", "2629145e163f16b525bd5a3f310837e146c38e9f"], # v0.39.1
     ["cba1ade848feac44b2eda677503900639581c3f4", "37e73aaa3c2ea2d91aa4a42f50df7f64c182a36a"], # v0.40.0
+    ["9e781040d9067c2711ec2e9f5b47b76ef70762b3", "8d398db4e51198a9a023e35aa55dd49c580bd726"], # v0.41.1
 ]
