@@ -16,6 +16,7 @@ public:
 
     void InvertIfMatches(PHLWINDOW window);
     void ToggleInvert(PHLWINDOW window);
+    // TODO remove deprecated
     void SetRules(std::vector<SWindowRule>&& rules);
     void Reload();
 
@@ -34,4 +35,7 @@ private:
     GLfloat bkgR = 0.0f;
     GLfloat bkgG = 0.0f;
     GLfloat bkgB = 0.0f;
+
+    // TODO remove deprecated
+    bool MatchesDeprecatedRule(PHLWINDOW window);
 };

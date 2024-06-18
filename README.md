@@ -4,7 +4,7 @@ Hyprland plugin that applies a chromakey effect for global window background tra
 ## Configuration
 ```conf
 # hyprland.conf
-chromakey_enable = fullscreen:0
+windowrulev2 = plugin:chromakey,fullscreen:0
 chromakey_background = rgb(07121b)
 ```
 
