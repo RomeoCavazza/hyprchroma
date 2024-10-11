@@ -37,7 +37,7 @@
 
             installPhase = ''
               mkdir -p $out/lib
-              install ./out/hypr-darkwindow.so $out/lib/libHypr-DarkWindow.so
+              install ./out/hyprchroma.so $out/lib/libHypr-DarkWindow.so
             '';
 
             meta = with pkgs.lib; {
