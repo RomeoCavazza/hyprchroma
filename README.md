@@ -1,4 +1,7 @@
 # Hyprchroma
+
+![2024-10-18-000536_hyprshot](https://github.com/user-attachments/assets/d47d78e7-5ddd-4637-83d4-6a8a7be2e0ce)
+
 Hyprchroma is a Hyprland plugin that applies a chromakey effect for global window background transparency without affecting readability
 
 ## Configuration
