@@ -1,4 +1,4 @@
-[Hypr-Chroma]
+[hyprchroma]
 description = "Apply Chromakey algorithm"
 authors = ["alexhulbert", "micha4w"]
 output = "out/hyprchroma.so"
