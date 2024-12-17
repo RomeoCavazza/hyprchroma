@@ -6,35 +6,39 @@
 #include <hyprland/src/render/shaders/Textures.hpp>
 
 
-inline static constexpr auto DARK_MODE_FUNC = [](const std::string colorVarName) -> std::string {
-    return std::format(R"glsl(
-	// Original shader by ikz87
+inline static const std::string DARK_MODE_FUNC = R"glsl(
+uniform bool doInvert;
 
-	// Apply opacity changes to pixels similar to one color
-	// vec3 color_rgb = vec3(0,0,255); // Color to replace, in rgb format
-	float similarity = 0.1; // How many similar colors should be affected.
+void invert(inout vec4 color) {
+    if (doInvert) {
+        // Original shader by ikz87
 
-	float amount = 1.4; // How much similar colors should be changed.
-	float target_opacity = 0.83;
-	// Change any of the above values to get the result you want
+        // Apply opacity changes to pixels similar to one color
+        // vec3 color_rgb = vec3(0,0,255); // Color to replace, in rgb format
+        float similarity = 0.1; // How many similar colors should be affected.
 
-	// Set values to a 0 - 1 range
-	vec3 chroma = vec3(bkg[0]/255.0, bkg[1]/255.0, bkg[2]/255.0);
+        float amount = 1.4; // How much similar colors should be changed.
+        float target_opacity = 0.83;
+        // Change any of the above values to get the result you want
 
-	if ({0}.x >=chroma.x - similarity && {0}.x <=chroma.x + similarity &&
-            {0}.y >=chroma.y - similarity && {0}.y <=chroma.y + similarity &&
-            {0}.z >=chroma.z - similarity && {0}.z <=chroma.z + similarity &&
-            {0}.w >= 0.99)
-	{{
-	    // Calculate error between matched pixel and color_rgb values
-            vec3 error = vec3(abs(chroma.x - {0}.x), abs(chroma.y - {0}.y), abs(chroma.z - {0}.z));
-	    float avg_error = (error.x + error.y + error.z) / 3.0;
-            {0}.w = target_opacity + (1.0 - target_opacity)*avg_error*amount/similarity;
+        // Set values to a 0 - 1 range
+        vec3 chroma = vec3(bkg[0]/255.0, bkg[1]/255.0, bkg[2]/255.0);
 
-	    // {0}.rgba = vec4(0, 0, 1, 0.5);
-	}}
-    )glsl", colorVarName);
-};
+        if (color.x >=chroma.x - similarity && color.x <=chroma.x + similarity &&
+                color.y >=chroma.y - similarity && color.y <=chroma.y + similarity &&
+                color.z >=chroma.z - similarity && color.z <=chroma.z + similarity &&
+                color.w >= 0.99)
+        {{
+            // Calculate error between matched pixel and color_rgb values
+                vec3 error = vec3(abs(chroma.x - color.x), abs(chroma.y - color.y), abs(chroma.z - color.z));
+            float avg_error = (error.x + error.y + error.z) / 3.0;
+                color.w = target_opacity + (1.0 - target_opacity)*avg_error*amount/similarity;
+
+            // color.rgba = vec4(0, 0, 1, 0.5);
+        }}
+    }
+}
+)glsl";
 
 
 inline const std::string TEXFRAGSRCRGBA_DARK = R"glsl(
@@ -56,6 +60,8 @@ uniform vec3 tint;
 
 uniform vec3 bkg;
 
+)glsl" + DARK_MODE_FUNC + R"glsl(
+
 void main() {
 
     vec4 pixColor = texture2D(tex, v_texcoord);
@@ -72,7 +78,7 @@ void main() {
 	    pixColor[2] = pixColor[2] * tint[2];
     }
 
-	)glsl" + DARK_MODE_FUNC("pixColor") +  R"glsl(
+    invert(pixColor);
 
     if (radius > 0.0) {
     )glsl" +
@@ -101,6 +107,8 @@ uniform vec3 tint;
 
 uniform vec3 bkg;
 
+)glsl" + DARK_MODE_FUNC + R"glsl(
+
 void main() {
 
     if (discardOpaque == 1 && alpha == 1.0)
@@ -109,12 +117,12 @@ void main() {
     vec4 pixColor = vec4(texture2D(tex, v_texcoord).rgb, 1.0);
 
     if (applyTint == 2) {
-	pixColor[0] = pixColor[0] * tint[0];
-	pixColor[1] = pixColor[1] * tint[1];
-	pixColor[2] = pixColor[2] * tint[2];
+        pixColor[0] = pixColor[0] * tint[0];
+        pixColor[1] = pixColor[1] * tint[1];
+        pixColor[2] = pixColor[2] * tint[2];
     }
 
-	)glsl" + DARK_MODE_FUNC("pixColor") +  R"glsl(
+    invert(pixColor);
 
     if (radius > 0.0) {
     )glsl" +
@@ -143,8 +151,6 @@ uniform int discardAlphaValue;
 uniform int applyTint;
 uniform vec3 tint;
 
-uniform vec3 bkg;
-
 void main() {
 
     vec4 pixColor = texture2D(texture0, v_texcoord);
@@ -153,12 +159,12 @@ void main() {
         discard;
 
     if (applyTint == 2) {
-	pixColor[0] = pixColor[0] * tint[0];
-	pixColor[1] = pixColor[1] * tint[1];
-	pixColor[2] = pixColor[2] * tint[2];
+        pixColor[0] = pixColor[0] * tint[0];
+        pixColor[1] = pixColor[1] * tint[1];
+        pixColor[2] = pixColor[2] * tint[2];
     }
 
-	)glsl" + DARK_MODE_FUNC("pixColor") +  R"glsl(
+    invert(pixColor);
 
     if (radius > 0.0) {
     )glsl" +
