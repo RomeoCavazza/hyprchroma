@@ -9,6 +9,9 @@ commit_pins = [
     ["0f594732b063a90d44df8c5d402d658f27471dfe", "1ba6be1e61de53c5797e230c7f87010cdda578de"], # v0.43.0
     ["1e424d94f87b38b272c6c765cfa09044dd6b8a40", "6158ac01f2da2eef98c25b069801a52c01dc07bd"], # v0.44.0
     ["4520b30d498daca8079365bdb909a8dea38e8d55", "6158ac01f2da2eef98c25b069801a52c01dc07bd"], # v0.44.1
+    ["a425fbebe4cf4238e48a42f724ef2208959d66cf", "a49a9efedf568c3c86a4da331f08c0f241b37bb3"], # v0.45.0
+    ["500d2a3580388afc8b620b0a3624147faa34f98b", "a49a9efedf568c3c86a4da331f08c0f241b37bb3"], # v0.45.1
+    ["12f9a0d0b93f691d4d9923716557154d74777b0a", "a49a9efedf568c3c86a4da331f08c0f241b37bb3"], # v0.45.2
 ]
 [hyprchroma]
 description = "Apply Chromakey algorithm"
