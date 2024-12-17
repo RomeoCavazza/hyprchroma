@@ -8,6 +8,7 @@
 
 inline static const std::string DARK_MODE_FUNC = R"glsl(
 uniform bool doInvert;
+uniform vec3 bkg;
 
 void invert(inout vec4 color) {
     if (doInvert) {
@@ -28,14 +29,14 @@ void invert(inout vec4 color) {
                 color.y >=chroma.y - similarity && color.y <=chroma.y + similarity &&
                 color.z >=chroma.z - similarity && color.z <=chroma.z + similarity &&
                 color.w >= 0.99)
-        {{
+        {
             // Calculate error between matched pixel and color_rgb values
                 vec3 error = vec3(abs(chroma.x - color.x), abs(chroma.y - color.y), abs(chroma.z - color.z));
             float avg_error = (error.x + error.y + error.z) / 3.0;
                 color.w = target_opacity + (1.0 - target_opacity)*avg_error*amount/similarity;
 
             // color.rgba = vec4(0, 0, 1, 0.5);
-        }}
+        }
     }
 }
 )glsl";
@@ -57,8 +58,6 @@ uniform float discardAlphaValue;
 
 uniform int applyTint;
 uniform vec3 tint;
-
-uniform vec3 bkg;
 
 )glsl" + DARK_MODE_FUNC + R"glsl(
 
@@ -105,8 +104,6 @@ uniform int discardAlphaValue;
 uniform int applyTint;
 uniform vec3 tint;
 
-uniform vec3 bkg;
-
 )glsl" + DARK_MODE_FUNC + R"glsl(
 
 void main() {
@@ -150,6 +147,8 @@ uniform int discardAlphaValue;
 
 uniform int applyTint;
 uniform vec3 tint;
+
+)glsl" + DARK_MODE_FUNC + R"glsl(
 
 void main() {
 
