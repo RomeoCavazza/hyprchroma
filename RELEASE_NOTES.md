@@ -2,28 +2,21 @@ Hyprland v0.54.2 port. The upstream GL shader hook approach is incompatible with
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    subgraph upstream ["Upstream (broken on v0.54+)"]
-        direction LR
-        A[Window render] --> B[registerCallbackDynamic hook]
-        B --> C[GL shader compilation intercept]
-        C --> D[Swap tint.glsl at runtime]
-        D --> E[Output]
-    end
+```
+Upstream (broken on v0.54+)
+  Window render
+    → registerCallbackDynamic hook
+    → GL shader compilation intercept
+    → Swap tint.glsl at runtime
+    → Output
 
-    subgraph fork ["This fork (v0.54.2)"]
-        direction LR
-        F[Window render] --> G[RENDER_POST_WINDOW event]
-        G --> H{visible workspace?\nper-frame guard?}
-        H -- pass --> I[CRectPassElement\nrounding + alpha + offset]
-        H -- skip --> J[no-op]
-        I --> K[Output]
-        J --> K
-    end
-
-    style upstream fill:#2a1a1a,stroke:#cc4444
-    style fork fill:#1a2a1a,stroke:#44aa44
+This fork (v0.54.2)
+  Window render
+    → RENDER_POST_WINDOW event
+    → visible workspace? per-frame guard?
+        pass → CRectPassElement (rounding + alpha + workspace offset)
+        skip → no-op
+    → Output
 ```
 
 The upstream implementation swaps tint shaders at GL compile time (6 source files, `registerCallbackDynamic`). That internal renderer state was removed in Hyprland v0.40.
