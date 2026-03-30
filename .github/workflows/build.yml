@@ -1,0 +1,31 @@
+name: Build Hyprchroma
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  nix-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v26
+        with:
+          extra_nix_config: |
+            extra-trusted-substituters = https://hyprland.cachix.org
+            extra-trusted-public-keys = hyprland.cachix.org-1:a7pgxzMz7+ voices2recHrdaZaCIkEUY6LzLkKWVfKN0L4w=
+
+      - name: Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build
+        run: nix build -L
+
+      - name: Verify output
+        run: |
+          ls -la result/lib/
+          file result/lib/libhyprchroma.so
