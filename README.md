@@ -82,8 +82,8 @@ This fork is a complete rewrite for Hyprland v0.54.2 compatibility. The upstream
 | Architecture | 6 files, shader swapping | Single file (250 LOC) |
 | Render method | GL shader hooks | `CRectPassElement` overlay |
 | Event API | `registerCallbackDynamic` | `Event::bus()` |
-| Animation sync | None | ✅ Workspace slide offset |
-| Ghost layers | Present | ✅ Fixed |
+| Animation sync | None | Workspace slide offset |
+| Ghost layers | Present | Fixed |
 | Hyprland target | ≤ v0.36 | **v0.54.2** |
 
 ### Target environment
