@@ -1,6 +1,6 @@
 {
   inputs = {
-    hyprland.url = "git+https://github.com/hyprwm/Hyprland?submodules=1&ref=v0.54.2";
+    hyprland.url = "git+https://github.com/hyprwm/Hyprland?submodules=1&ref=refs/tags/v0.54.2";
     nix-filter.url = "github:numtide/nix-filter";
   };
 
