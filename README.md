@@ -1,9 +1,9 @@
 # Hyprchroma
 
+![2024-10-18-000536_hyprshot](https://github.com/user-attachments/assets/d47d78e7-5ddd-4637-83d4-6a8a7be2e0ce)
+
 [![Build](https://github.com/RomeoCavazza/Hyprchroma/actions/workflows/build.yml/badge.svg)](https://github.com/RomeoCavazza/Hyprchroma/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/RomeoCavazza/Hyprchroma?display_name=tag)](https://github.com/RomeoCavazza/Hyprchroma/releases)
-
-![2024-10-18-000536_hyprshot](https://github.com/user-attachments/assets/d47d78e7-5ddd-4637-83d4-6a8a7be2e0ce)
 
 Hyprchroma is a Hyprland plugin that applies an adaptive chromakey tint while preserving readability and high-chroma UI elements.
 
