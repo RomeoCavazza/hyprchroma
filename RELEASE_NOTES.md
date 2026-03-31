@@ -1,44 +1,49 @@
-Hyprland v0.54.2 port. The upstream GL shader hook approach is incompatible with Hyprland's refactored render pipeline (v0.40+). This is a complete rewrite targeting the v0.54.2 API.
+Hyprchroma v3 delivers the first adaptive shader-based release of this v0.54.2 port. The plugin no longer relies on a single uniform window overlay as its primary path. It now traverses window surfaces and subsurfaces, applying a per-surface chromakey tint that preserves bright and saturated content more effectively.
 
-## Architecture
+## What changed in v3
+
+- Replaced the v2-first uniform overlay model with a per-surface shader path.
+- Preserved bright pixels using a luminance-based protection mask.
+- Preserved vivid UI elements and artwork using a saturation-based protection mask.
+- Reduced false tinting on complex apps by traversing surfaces and subsurfaces instead of treating the entire window as one texture.
+- Kept a fallback overlay path for unsupported or unusable surface textures.
+
+## Render model
 
 ```
-Upstream (broken on v0.54+)
-  Window render
-    → registerCallbackDynamic hook
-    → GL shader compilation intercept
-    → Swap tint.glsl at runtime
-    → Output
+v2
+  Window
+    -> one overlay box
+    -> uniform tint
 
-This fork (v0.54.2)
-  Window render
-    → RENDER_POST_WINDOW event
-    → visible workspace? per-frame guard?
-        pass → CRectPassElement (rounding + alpha + workspace offset)
-        skip → no-op
-    → Output
+v3
+  Window
+    -> breadth-first surface traversal
+    -> one shader pass per usable surface
+    -> adaptive tint mask:
+         dark pixels + muted pixels -> tinted
+         bright pixels or saturated pixels -> preserved
 ```
-
-The upstream implementation swaps tint shaders at GL compile time (6 source files, `registerCallbackDynamic`). That internal renderer state was removed in Hyprland v0.40.
-
-This port injects a `CRectPassElement` overlay into the render pass at `RENDER_POST_WINDOW`. The overlay inherits window rounding, tracks workspace animation offsets, and prevents double-exposure on the active window via a per-frame guard set.
 
 ## Diff
 
-|                     | Upstream                 | v2.0.0                   |
-|---------------------|--------------------------|--------------------------|
-| Source              | 6 files                  | 1 file, 250 LOC          |
-| Render method       | GL shader swap           | CRectPassElement overlay |
-| Event API           | registerCallbackDynamic  | Event::bus()             |
-| Workspace animation | None                     | Render offset applied    |
-| Ghost window layers | Present                  | Fixed (m_visible guard)  |
-| Target              | Hyprland <= v0.36        | Hyprland v0.54.2         |
+|                     | v2.0.0-v054              | v3.x                      |
+|---------------------|--------------------------|---------------------------|
+| Primary path        | Uniform overlay          | Per-surface shader pass   |
+| Window treatment    | Whole window at once     | Surface/subsurface aware  |
+| Pixel preservation  | Limited                  | Bright and vivid pixels preserved |
+| Complex app support | Partial                  | Improved                  |
+| Fallback            | Always acceptable        | Only for unsupported surfaces |
 
-Configuration keys (`plugin:darkwindow:*`) are unchanged from upstream.
+Configuration keys under `plugin:darkwindow:*` remain backward compatible, with additional tuning for bright and saturated pixel protection.
 
-## Build environment
+## Tested environment
 
-Tested against Hyprland `59f9f268` (v0.54.2), Hyprutils 0.11.0, Hyprlang 0.6.8, Aquamarine 0.10.0, NixOS 26.05 (Yarara).
+- Hyprland `59f9f268` (`v0.54.2`)
+- Hyprutils `0.11.0`
+- Hyprlang `0.6.8`
+- Aquamarine `0.10.0`
+- NixOS `26.05 (Yarara)`
 
 ## Credits
 
