@@ -90,16 +90,25 @@ hyprctl plugin load ./out/hyprchroma.so
 
 ## Changes from upstream
 
-This fork started as a compatibility rewrite for Hyprland v0.54.2. It now ships an adaptive per-surface shader path that preserves bright and high-chroma pixels significantly better than a uniform overlay.
+This fork went through two distinct stages on top of the original project: a compatibility rewrite for Hyprland v0.54.2, followed by the current adaptive per-surface shader path.
 
-| What | Upstream | This fork |
-|------|----------|-----------|
-| Architecture | 6 files, shader swapping | Single-file plugin core with per-surface passes |
-| Render method | GL shader hooks | Adaptive shader pass + fallback overlay |
-| Event API | `registerCallbackDynamic` | `Event::bus()` |
-| Pixel preservation | Original chromakey intent | Bright/saturated pixels preserved |
-| Surface handling | Legacy renderer assumptions | Surface/subsurface traversal |
-| Hyprland target | ≤ v0.36 | **v0.54.2** |
+```mermaid
+flowchart LR
+    v1["Upstream\nHyprland <= v0.36\nGL shader hooks\n6-file implementation"]
+    v2["v2.0.0-v054\nCompatibility rewrite\nUniform CRectPassElement overlay"]
+    v3["v3.2.0-v054\nAdaptive per-surface shader path\nBright/saturated pixel preservation"]
+
+    v1 --> v2 --> v3
+```
+
+| What | Upstream | v2.0.0-v054 | v3.2.0-v054 |
+|------|----------|-------------|-------------|
+| Architecture | 6 files, shader swapping | Single-file compatibility rewrite | Single-file plugin core with per-surface passes |
+| Render method | GL shader hooks | `CRectPassElement` uniform overlay | Adaptive shader pass + fallback overlay |
+| Event API | `registerCallbackDynamic` | `Event::bus()` | `Event::bus()` |
+| Pixel preservation | Original chromakey intent | Limited | Bright and saturated pixels preserved |
+| Surface handling | Legacy renderer assumptions | Whole-window overlay | Surface/subsurface traversal |
+| Hyprland target | ≤ v0.36 | v0.54.2 | **v0.54.2** |
 
 ### Target environment
 - Hyprland v0.54.2 (`59f9f268`)
@@ -110,11 +119,6 @@ This fork started as a compatibility rewrite for Hyprland v0.54.2. It now ships 
 
 - [alexhulbert/Hyprchroma](https://github.com/alexhulbert/Hyprchroma) — Original plugin
 - [micha4w/Hypr-DarkWindow](https://github.com/micha4w/Hypr-DarkWindow) — Ancestor project
-
-## Status
-
-`/etc/nixos/home/tco/pkgs/Hyprchroma-fork` is the source of truth for local development.
-`/etc/nixos/home/tco/pkgs/hyprchroma` can be removed once any local references to it are migrated.
 
 ## License
 
