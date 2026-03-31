@@ -1,51 +1,62 @@
-Hyprchroma v3 delivers the first adaptive shader-based release of this v0.54.2 port. The plugin no longer relies on a single uniform window overlay as its primary path. It now traverses window surfaces and subsurfaces, applying a per-surface chromakey tint that preserves bright and saturated content more effectively.
+## v3.3.0-v054
 
-## What changed in v3
+Hyprchroma v3.3.0-v054 hardens the adaptive shader path for pixel-perfect use on Hyprland v0.54.2.
 
-- Replaced the v2-first uniform overlay model with a per-surface shader path.
-- Preserved bright pixels using a luminance-based protection mask.
-- Preserved vivid UI elements and artwork using a saturation-based protection mask.
-- Reduced false tinting on complex apps by traversing surfaces and subsurfaces instead of treating the entire window as one texture.
-- Kept a fallback overlay path for unsupported or unusable surface textures.
+## Highlights
+
+- Removed cursor-driven mask decorrelation from the fragment shaders.
+- Replaced the old one-pass-per-surface path with a grouped per-window pass.
+- Added stencil guarding so overlapping subsurfaces do not stack tint unexpectedly.
+- Kept rounded corners only on the root surface to avoid clipping child UI elements like toolbar buttons.
+- Added `plugin:darkwindow:tint_all_surfaces` to allow debugging root-only tinting if needed.
+
+## Why this release exists
+
+v3.2.0-v054 introduced the adaptive per-surface shader path, but difficult layouts could still expose artifacts:
+
+- dark pages with dense controls
+- half-tiled windows
+- areas near top and left edges
+
+The underlying issue was not just repaint timing. The previous pipeline also allowed the visible mask to depend on cursor position, and it rendered surfaces independently in a way that could exaggerate artifacts in complex UI regions.
+
+v3.3 removes that cursor dependency and switches to a grouped render model that is much more stable on real applications like GitHub and other dark UIs.
 
 ## Render model
 
-```
-v2
-  Window
-    -> one overlay box
-    -> uniform tint
-
-v3
+```text
+v3.2
   Window
     -> breadth-first surface traversal
-    -> one shader pass per usable surface
-    -> adaptive tint mask:
-         dark pixels + muted pixels -> tinted
-         bright pixels or saturated pixels -> preserved
+    -> independent pass per usable surface
+    -> optional cursor-driven mask perturbation
+
+v3.3
+  Window
+    -> breadth-first surface traversal
+    -> grouped adaptive pass for the whole window
+    -> stencil guard prevents stacked tinting
+    -> no cursor-driven mask perturbation
 ```
 
-## Diff
+## Compatibility
 
-|                     | v2.0.0-v054              | v3.x                      |
-|---------------------|--------------------------|---------------------------|
-| Primary path        | Uniform overlay          | Per-surface shader pass   |
-| Window treatment    | Whole window at once     | Surface/subsurface aware  |
-| Pixel preservation  | Limited                  | Bright and vivid pixels preserved |
-| Complex app support | Partial                  | Improved                  |
-| Fallback            | Always acceptable        | Only for unsupported surfaces |
+- Target Hyprland: `v0.54.2`
+- Tested stack:
+  - Hyprland `59f9f268`
+  - Hyprutils `0.11.0`
+  - Hyprlang `0.6.8`
+  - Aquamarine `0.10.0`
+  - NixOS `26.05 (Yarara)`
 
-Configuration keys under `plugin:darkwindow:*` remain backward compatible, with additional tuning for bright and saturated pixel protection.
+## Upgrade note
 
-## Tested environment
+Existing `plugin:darkwindow:*` settings remain compatible.
 
-- Hyprland `59f9f268` (`v0.54.2`)
-- Hyprutils `0.11.0`
-- Hyprlang `0.6.8`
-- Aquamarine `0.10.0`
-- NixOS `26.05 (Yarara)`
+If you want the most conservative path for debugging, you can temporarily set:
 
-## Credits
+```conf
+plugin:darkwindow:tint_all_surfaces = 0
+```
 
-- [alexhulbert/Hyprchroma](https://github.com/alexhulbert/Hyprchroma) — original plugin
-- [micha4w/Hypr-DarkWindow](https://github.com/micha4w/Hypr-DarkWindow) — ancestor project
+The default remains `1`.

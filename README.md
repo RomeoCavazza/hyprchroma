@@ -1,9 +1,9 @@
 # Hyprchroma
 
-![2024-10-18-000536_hyprshot](https://github.com/user-attachments/assets/d47d78e7-5ddd-4637-83d4-6a8a7be2e0ce)
-
 [![Build](https://github.com/RomeoCavazza/Hyprchroma/actions/workflows/build.yml/badge.svg)](https://github.com/RomeoCavazza/Hyprchroma/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/RomeoCavazza/Hyprchroma?display_name=tag)](https://github.com/RomeoCavazza/Hyprchroma/releases)
+
+![2024-10-18-000536_hyprshot](https://github.com/user-attachments/assets/d47d78e7-5ddd-4637-83d4-6a8a7be2e0ce)
 
 Hyprchroma is a Hyprland plugin that applies an adaptive chromakey tint while preserving readability and high-chroma UI elements.
 
@@ -33,7 +33,12 @@ plugin:darkwindow:saturation_knee      = 0.25
 
 # Apply tint on fullscreen windows (0 = no, 1 = yes)
 plugin:darkwindow:enable_on_fullscreen = 0
+
+# Debug switch: tint only the root surface instead of all traced surfaces
+plugin:darkwindow:tint_all_surfaces    = 1
 ```
+
+The values above are a recommended starting point, not the exact compiled defaults.
 
 Also adds 2 dispatchers: `togglechromakey` (for the active window) and `darkwindow:shade address:0x<addr>` (per-window toggle)
 
@@ -54,7 +59,7 @@ Also adds 2 dispatchers: `togglechromakey` (for the active window) and `darkwind
 hyprchroma-src = pkgs.writeText "main.cpp" (builtins.readFile ./pkgs/Hyprchroma-fork/src/main.cpp);
 hypr-darkwindow = pkgs.stdenv.mkDerivation {
   pname   = "hypr-darkwindow";
-  version = "3.2-v054";
+  version = "3.3.0-v054";
   dontUnpack = true;
   nativeBuildInputs = [ pkgs.pkg-config ];
   buildInputs = [ hyprland-pkg ] ++ hyprland-pkg.buildInputs;
@@ -86,25 +91,16 @@ hyprctl plugin load ./out/hyprchroma.so
 
 ## Changes from upstream
 
-This fork went through two distinct stages on top of the original project: a compatibility rewrite for Hyprland v0.54.2, followed by the current adaptive per-surface shader path.
+This fork started as a compatibility rewrite for Hyprland v0.54.2. It now ships a grouped adaptive shader path that preserves bright and high-chroma pixels significantly better than a uniform overlay while staying stable on complex dark interfaces.
 
-```mermaid
-flowchart LR
-    v1["Upstream\nHyprland <= v0.36\nGL shader hooks\n6-file implementation"]
-    v2["v2.0.0-v054\nCompatibility rewrite\nUniform CRectPassElement overlay"]
-    v3["v3.2.0-v054\nAdaptive per-surface shader path\nBright/saturated pixel preservation"]
-
-    v1 --> v2 --> v3
-```
-
-| What | Upstream | v2.0.0-v054 | v3.2.0-v054 |
-|------|----------|-------------|-------------|
-| Architecture | 6 files, shader swapping | Single-file compatibility rewrite | Single-file plugin core with per-surface passes |
-| Render method | GL shader hooks | `CRectPassElement` uniform overlay | Adaptive shader pass + fallback overlay |
-| Event API | `registerCallbackDynamic` | `Event::bus()` | `Event::bus()` |
-| Pixel preservation | Original chromakey intent | Limited | Bright and saturated pixels preserved |
-| Surface handling | Legacy renderer assumptions | Whole-window overlay | Surface/subsurface traversal |
-| Hyprland target | ≤ v0.36 | v0.54.2 | **v0.54.2** |
+| What | Upstream | v2.0.0-v054 | v3.2.0-v054 | v3.3.0-v054 |
+|------|----------|-------------|-------------|-------------|
+| Architecture | 6 files, shader swapping | Compatibility rewrite | Adaptive per-surface passes | Grouped adaptive window pass |
+| Render method | GL shader hooks | `CRectPassElement` uniform overlay | Independent surface shader passes | Grouped shader pass + stencil guard |
+| Event API | `registerCallbackDynamic` | `Event::bus()` | `Event::bus()` | `Event::bus()` |
+| Pixel preservation | Original chromakey intent | Limited | Bright/saturated pixels preserved | Same, but without cursor-driven perturbation |
+| Surface handling | Legacy renderer assumptions | Whole-window overlay | Surface/subsurface traversal | Surface traversal with grouped composition |
+| Hyprland target | ≤ v0.36 | v0.54.2 | v0.54.2 | **v0.54.2** |
 
 ### Target environment
 - Hyprland v0.54.2 (`59f9f268`)
@@ -115,6 +111,10 @@ flowchart LR
 
 - [alexhulbert/Hyprchroma](https://github.com/alexhulbert/Hyprchroma) — Original plugin
 - [micha4w/Hypr-DarkWindow](https://github.com/micha4w/Hypr-DarkWindow) — Ancestor project
+
+## Release Status
+
+Current shipping target: `v3.3.0-v054`
 
 ## License
 

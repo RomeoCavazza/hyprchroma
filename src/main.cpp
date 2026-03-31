@@ -1,4 +1,4 @@
-// libhypr-darkwindow.so — Hyprchroma v3.2 for Hyprland v0.54.2
+// libhypr-darkwindow.so — Hyprchroma v3.3 for Hyprland v0.54.2
 //
 // Per-pixel luminance-based chromakey tint overlay.
 // Samples window surface texture to vary tint alpha: strong on dark pixels,
@@ -9,6 +9,7 @@
 #include <any>
 #include <format>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -25,9 +26,9 @@
 #include <hyprland/src/managers/SeatManager.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
-#include <hyprland/src/render/pass/BorderPassElement.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/render/pass/BorderPassElement.hpp>
 #include <hyprland/src/render/pass/PassElement.hpp>
 #include <hyprland/src/render/pass/RectPassElement.hpp>
 #include <hyprlang.hpp>
@@ -58,6 +59,7 @@ struct SConfig {
   float saturation_knee;
   int debug_visualize;
   bool enable_on_fullscreen;
+  bool tint_all_surfaces;
 } g_config;
 
 // ── v3 shader state ──
@@ -181,7 +183,6 @@ void main() {
         saturation
     );
     float preserve = clamp(max(brightProtect, saturatedProtect), 0.0, 1.0);
-
     float alpha = tintStrength * (1.0 - preserve) * (1.0 - luminance) * windowAlpha;
     alpha = clamp(alpha, 0.0, 1.0);
 
@@ -282,7 +283,6 @@ void main() {
         saturation
     );
     float preserve = clamp(max(brightProtect, saturatedProtect), 0.0, 1.0);
-
     float alpha = tintStrength * (1.0 - preserve) * (1.0 - luminance) * windowAlpha;
     alpha = clamp(alpha, 0.0, 1.0);
 
@@ -376,19 +376,13 @@ static GLuint linkProgramRaw(GLuint vert, GLuint frag) {
   return prog;
 }
 
-static void queryUniformLocations(GLuint prog, GLint &proj, GLint &windowTex,
-                                  GLint &tintColor, GLint &tintStrength,
-                                  GLint &windowAlpha, GLint &topLeft,
-                                  GLint &fullSize, GLint &radius,
-                                  GLint &roundingPower, GLint &uvTopLeft,
-                                  GLint &uvBottomRight,
-                                  GLint &protectBrights,
-                                  GLint &brightThreshold,
-                                  GLint &brightKnee,
-                                  GLint &protectSaturated,
-                                  GLint &saturationThreshold,
-                                  GLint &saturationKnee,
-                                  GLint &debugVisualize) {
+static void queryUniformLocations(
+    GLuint prog, GLint &proj, GLint &windowTex, GLint &tintColor,
+    GLint &tintStrength, GLint &windowAlpha, GLint &topLeft, GLint &fullSize,
+    GLint &radius, GLint &roundingPower, GLint &uvTopLeft, GLint &uvBottomRight,
+    GLint &protectBrights, GLint &brightThreshold, GLint &brightKnee,
+    GLint &protectSaturated, GLint &saturationThreshold, GLint &saturationKnee,
+    GLint &debugVisualize) {
   proj = glGetUniformLocation(prog, "proj");
   windowTex = glGetUniformLocation(prog, "windowTex");
   tintColor = glGetUniformLocation(prog, "tintColor");
@@ -425,14 +419,13 @@ static bool compileChromaShaders() {
   glDeleteShader(frag);
 
   if (g_chromaProgram) {
-    queryUniformLocations(g_chromaProgram, g_loc_proj, g_loc_windowTex,
-                          g_loc_tintColor, g_loc_tintStrength,
-                          g_loc_windowAlpha, g_loc_topLeft, g_loc_fullSize,
-                          g_loc_radius, g_loc_roundingPower, g_loc_uvTopLeft,
-                          g_loc_uvBottomRight, g_loc_protectBrights,
-                          g_loc_brightThreshold, g_loc_brightKnee,
-                          g_loc_protectSaturated, g_loc_saturationThreshold,
-                          g_loc_saturationKnee, g_loc_debugVisualize);
+    queryUniformLocations(
+        g_chromaProgram, g_loc_proj, g_loc_windowTex, g_loc_tintColor,
+        g_loc_tintStrength, g_loc_windowAlpha, g_loc_topLeft, g_loc_fullSize,
+        g_loc_radius, g_loc_roundingPower, g_loc_uvTopLeft, g_loc_uvBottomRight,
+        g_loc_protectBrights, g_loc_brightThreshold, g_loc_brightKnee,
+        g_loc_protectSaturated, g_loc_saturationThreshold, g_loc_saturationKnee,
+        g_loc_debugVisualize);
   }
 
   // samplerExternalOES variant
@@ -441,21 +434,19 @@ static bool compileChromaShaders() {
     g_chromaProgram_ext = linkProgramRaw(vert, fragExt);
     glDeleteShader(fragExt);
     if (g_chromaProgram_ext) {
-      queryUniformLocations(g_chromaProgram_ext, g_loc_ext_proj,
-                            g_loc_ext_windowTex, g_loc_ext_tintColor,
-                            g_loc_ext_tintStrength, g_loc_ext_windowAlpha,
-                            g_loc_ext_topLeft, g_loc_ext_fullSize,
-                            g_loc_ext_radius, g_loc_ext_roundingPower,
-                            g_loc_ext_uvTopLeft, g_loc_ext_uvBottomRight,
-                            g_loc_ext_protectBrights,
-                            g_loc_ext_brightThreshold, g_loc_ext_brightKnee,
-                            g_loc_ext_protectSaturated,
-                            g_loc_ext_saturationThreshold,
-                            g_loc_ext_saturationKnee,
-                            g_loc_ext_debugVisualize);
+      queryUniformLocations(
+          g_chromaProgram_ext, g_loc_ext_proj, g_loc_ext_windowTex,
+          g_loc_ext_tintColor, g_loc_ext_tintStrength, g_loc_ext_windowAlpha,
+          g_loc_ext_topLeft, g_loc_ext_fullSize, g_loc_ext_radius,
+          g_loc_ext_roundingPower, g_loc_ext_uvTopLeft, g_loc_ext_uvBottomRight,
+          g_loc_ext_protectBrights, g_loc_ext_brightThreshold,
+          g_loc_ext_brightKnee, g_loc_ext_protectSaturated,
+          g_loc_ext_saturationThreshold, g_loc_ext_saturationKnee,
+          g_loc_ext_debugVisualize);
     }
   } else {
-    Log::logger->log(Log::WARN, "[Hyprchroma] OES_EGL_image_external_essl3 not available, "
+    Log::logger->log(Log::WARN,
+                     "[Hyprchroma] OES_EGL_image_external_essl3 not available, "
                      "DMA-BUF windows will use uniform tint fallback");
   }
 
@@ -489,8 +480,16 @@ static bool compileChromaShaders() {
 
 class CChromaPassElement : public IPassElement {
 public:
-  struct SChromaData {
+  struct SSurfaceData {
+    SP<CTexture> windowTex;
     CBox box;
+    Vector2D uvTopLeft = Vector2D(0.F, 0.F);
+    Vector2D uvBottomRight = Vector2D(1.F, 1.F);
+    float alpha = 1.0f;
+    bool isRootSurface = false;
+  };
+
+  struct SChromaData {
     CBox clipBox;
     float tintR, tintG, tintB;
     float tintStrength;
@@ -507,8 +506,7 @@ public:
     float saturationThreshold = 0.20f;
     float saturationKnee = 0.16f;
     int debugVisualize = 0;
-    bool isRootSurface = false;
-    SP<CTexture> windowTex;
+    std::vector<SSurfaceData> surfaces;
   };
 
   CChromaPassElement(const SChromaData &data) : m_data(data) {}
@@ -518,134 +516,177 @@ public:
   virtual bool needsLiveBlur() override { return false; }
   virtual bool needsPrecomputeBlur() override { return false; }
   virtual const char *passName() override { return "CChromaPassElement"; }
-  virtual std::optional<CBox> boundingBox() override { return m_data.box; }
+  virtual std::optional<CBox> boundingBox() override { return m_data.clipBox; }
 
 private:
   SChromaData m_data;
 };
 
 void CChromaPassElement::draw(const CRegion &damage) {
-  bool isExternal =
-      (m_data.windowTex->m_target == GL_TEXTURE_EXTERNAL_OES);
-  GLuint prog = isExternal ? g_chromaProgram_ext : g_chromaProgram;
-  if (prog == 0)
+  if (m_data.surfaces.empty())
     return;
 
-  GLint locProj = isExternal ? g_loc_ext_proj : g_loc_proj;
-  GLint locWindowTex = isExternal ? g_loc_ext_windowTex : g_loc_windowTex;
-  GLint locTintColor = isExternal ? g_loc_ext_tintColor : g_loc_tintColor;
-  GLint locTintStrength =
-      isExternal ? g_loc_ext_tintStrength : g_loc_tintStrength;
-  GLint locWindowAlpha =
-      isExternal ? g_loc_ext_windowAlpha : g_loc_windowAlpha;
-  GLint locTopLeft = isExternal ? g_loc_ext_topLeft : g_loc_topLeft;
-  GLint locFullSize = isExternal ? g_loc_ext_fullSize : g_loc_fullSize;
-  GLint locRadius = isExternal ? g_loc_ext_radius : g_loc_radius;
-  GLint locRoundingPower =
-      isExternal ? g_loc_ext_roundingPower : g_loc_roundingPower;
-  GLint locUvTopLeft = isExternal ? g_loc_ext_uvTopLeft : g_loc_uvTopLeft;
-  GLint locUvBottomRight =
-      isExternal ? g_loc_ext_uvBottomRight : g_loc_uvBottomRight;
-  GLint locProtectBrights =
-      isExternal ? g_loc_ext_protectBrights : g_loc_protectBrights;
-  GLint locBrightThreshold =
-      isExternal ? g_loc_ext_brightThreshold : g_loc_brightThreshold;
-  GLint locBrightKnee =
-      isExternal ? g_loc_ext_brightKnee : g_loc_brightKnee;
-  GLint locProtectSaturated =
-      isExternal ? g_loc_ext_protectSaturated : g_loc_protectSaturated;
-  GLint locSaturationThreshold = isExternal ? g_loc_ext_saturationThreshold
-                                            : g_loc_saturationThreshold;
-  GLint locSaturationKnee =
-      isExternal ? g_loc_ext_saturationKnee : g_loc_saturationKnee;
-  GLint locDebugVisualize =
-      isExternal ? g_loc_ext_debugVisualize : g_loc_debugVisualize;
-
+  auto pMonitor = g_pHyprOpenGL->m_renderData.pMonitor.lock();
+  if (!pMonitor)
+    return;
   // Save GL state
   GLint prevProgram = 0;
   glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
   GLint prevActiveTexture = 0;
   glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActiveTexture);
-  GLint prevTex = 0;
-  glGetIntegerv(isExternal ? GL_TEXTURE_BINDING_EXTERNAL_OES
-                           : GL_TEXTURE_BINDING_2D,
-                &prevTex);
+  GLint prevTex2D = 0;
+  GLint prevTexExternal = 0;
+  glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex2D);
+  glGetIntegerv(GL_TEXTURE_BINDING_EXTERNAL_OES, &prevTexExternal);
   GLint prevVAO = 0;
   glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVAO);
-
-  // Compute projection
-  auto matrix = g_pHyprOpenGL->m_renderData.monitorProjection.projectBox(
-      m_data.box, HYPRUTILS_TRANSFORM_NORMAL);
-  auto glMatrix =
-      g_pHyprOpenGL->m_renderData.projection.copy().multiply(matrix);
-  auto matData = glMatrix.getMatrix();
-
-  glUseProgram(prog);
-
-  glUniformMatrix3fv(locProj, 1, GL_TRUE, matData.data());
-  glUniform3f(locTintColor, m_data.tintR, m_data.tintG, m_data.tintB);
-  glUniform1f(locTintStrength, m_data.tintStrength);
-  glUniform1f(locWindowAlpha, m_data.windowAlpha);
-  CBox transformedBox = m_data.box;
-  transformedBox.transform(
-      Math::wlTransformToHyprutils(Math::invertTransform(
-          g_pHyprOpenGL->m_renderData.pMonitor->m_transform)),
-      g_pHyprOpenGL->m_renderData.pMonitor->m_transformedSize.x,
-      g_pHyprOpenGL->m_renderData.pMonitor->m_transformedSize.y);
-
-  glUniform1f(locRadius, (float)m_data.round);
-  glUniform1f(locRoundingPower, m_data.roundingPower);
-  glUniform2f(locTopLeft, transformedBox.x, transformedBox.y);
-  glUniform2f(locFullSize, transformedBox.w, transformedBox.h);
-  glUniform2f(locUvTopLeft, m_data.uvTopLeft.x, m_data.uvTopLeft.y);
-  glUniform2f(locUvBottomRight, m_data.uvBottomRight.x,
-              m_data.uvBottomRight.y);
-  glUniform1f(locProtectBrights, m_data.protectBrights);
-  glUniform1f(locBrightThreshold, m_data.brightThreshold);
-  glUniform1f(locBrightKnee, m_data.brightKnee);
-  glUniform1f(locProtectSaturated, m_data.protectSaturated);
-  glUniform1f(locSaturationThreshold, m_data.saturationThreshold);
-  glUniform1f(locSaturationKnee, m_data.saturationKnee);
-  glUniform1i(locDebugVisualize, m_data.debugVisualize);
-
-  // Bind window surface texture
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(m_data.windowTex->m_target, m_data.windowTex->m_texID);
-  glTexParameteri(m_data.windowTex->m_target, GL_TEXTURE_WRAP_S,
-                  GL_CLAMP_TO_EDGE);
-  glTexParameteri(m_data.windowTex->m_target, GL_TEXTURE_WRAP_T,
-                  GL_CLAMP_TO_EDGE);
-  glTexParameteri(m_data.windowTex->m_target, GL_TEXTURE_MIN_FILTER,
-                  m_data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
-  glTexParameteri(m_data.windowTex->m_target, GL_TEXTURE_MAG_FILTER,
-                  m_data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
-  glUniform1i(locWindowTex, 0);
+  GLboolean prevStencilEnabled = glIsEnabled(GL_STENCIL_TEST);
+  GLint prevStencilFunc = 0;
+  GLint prevStencilRef = 0;
+  GLint prevStencilValueMask = 0;
+  GLint prevStencilWriteMask = 0;
+  GLint prevStencilFail = 0;
+  GLint prevStencilPassDepthFail = 0;
+  GLint prevStencilPassDepthPass = 0;
+  GLint prevStencilClearValue = 0;
+  glGetIntegerv(GL_STENCIL_FUNC, &prevStencilFunc);
+  glGetIntegerv(GL_STENCIL_REF, &prevStencilRef);
+  glGetIntegerv(GL_STENCIL_VALUE_MASK, &prevStencilValueMask);
+  glGetIntegerv(GL_STENCIL_WRITEMASK, &prevStencilWriteMask);
+  glGetIntegerv(GL_STENCIL_FAIL, &prevStencilFail);
+  glGetIntegerv(GL_STENCIL_PASS_DEPTH_FAIL, &prevStencilPassDepthFail);
+  glGetIntegerv(GL_STENCIL_PASS_DEPTH_PASS, &prevStencilPassDepthPass);
+  glGetIntegerv(GL_STENCIL_CLEAR_VALUE, &prevStencilClearValue);
 
   glBindVertexArray(g_chromaVAO);
+  glEnable(GL_STENCIL_TEST);
+  glStencilMask(0x80);
+  glStencilFunc(GL_NOTEQUAL, 0x80, 0x80);
+  glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
 
-  // Scissor per damage rect
-  if (m_data.clipBox.w != 0 && m_data.clipBox.h != 0) {
-    CRegion damageClip{m_data.clipBox.x, m_data.clipBox.y, m_data.clipBox.w,
-                       m_data.clipBox.h};
-    damageClip.intersect(damage);
+  for (const auto &surf : m_data.surfaces) {
+    const bool isExternal =
+        (surf.windowTex->m_target == GL_TEXTURE_EXTERNAL_OES);
+    const GLuint prog = isExternal ? g_chromaProgram_ext : g_chromaProgram;
+    if (prog == 0)
+      continue;
 
-    for (auto &rect : damageClip.getRects()) {
+    const GLint locProj = isExternal ? g_loc_ext_proj : g_loc_proj;
+    const GLint locWindowTex =
+        isExternal ? g_loc_ext_windowTex : g_loc_windowTex;
+    const GLint locTintColor =
+        isExternal ? g_loc_ext_tintColor : g_loc_tintColor;
+    const GLint locTintStrength =
+        isExternal ? g_loc_ext_tintStrength : g_loc_tintStrength;
+    const GLint locWindowAlpha =
+        isExternal ? g_loc_ext_windowAlpha : g_loc_windowAlpha;
+    const GLint locTopLeft = isExternal ? g_loc_ext_topLeft : g_loc_topLeft;
+    const GLint locFullSize = isExternal ? g_loc_ext_fullSize : g_loc_fullSize;
+    const GLint locRadius = isExternal ? g_loc_ext_radius : g_loc_radius;
+    const GLint locRoundingPower =
+        isExternal ? g_loc_ext_roundingPower : g_loc_roundingPower;
+    const GLint locUvTopLeft =
+        isExternal ? g_loc_ext_uvTopLeft : g_loc_uvTopLeft;
+    const GLint locUvBottomRight =
+        isExternal ? g_loc_ext_uvBottomRight : g_loc_uvBottomRight;
+    const GLint locProtectBrights =
+        isExternal ? g_loc_ext_protectBrights : g_loc_protectBrights;
+    const GLint locBrightThreshold =
+        isExternal ? g_loc_ext_brightThreshold : g_loc_brightThreshold;
+    const GLint locBrightKnee =
+        isExternal ? g_loc_ext_brightKnee : g_loc_brightKnee;
+    const GLint locProtectSaturated =
+        isExternal ? g_loc_ext_protectSaturated : g_loc_protectSaturated;
+    const GLint locSaturationThreshold =
+        isExternal ? g_loc_ext_saturationThreshold : g_loc_saturationThreshold;
+    const GLint locSaturationKnee =
+        isExternal ? g_loc_ext_saturationKnee : g_loc_saturationKnee;
+    const GLint locDebugVisualize =
+        isExternal ? g_loc_ext_debugVisualize : g_loc_debugVisualize;
+
+    const auto matrix =
+        g_pHyprOpenGL->m_renderData.monitorProjection.projectBox(
+            surf.box, HYPRUTILS_TRANSFORM_NORMAL);
+    const auto glMatrix =
+        g_pHyprOpenGL->m_renderData.projection.copy().multiply(matrix);
+    const auto matData = glMatrix.getMatrix();
+
+    glUseProgram(prog);
+    glUniformMatrix3fv(locProj, 1, GL_TRUE, matData.data());
+    glUniform3f(locTintColor, m_data.tintR, m_data.tintG, m_data.tintB);
+    glUniform1f(locTintStrength, m_data.tintStrength);
+    glUniform1f(locWindowAlpha, m_data.windowAlpha * surf.alpha);
+
+    CBox transformedBox = surf.box;
+    transformedBox.transform(Math::wlTransformToHyprutils(
+                                 Math::invertTransform(pMonitor->m_transform)),
+                             pMonitor->m_transformedSize.x,
+                             pMonitor->m_transformedSize.y);
+
+    glUniform1f(locRadius, surf.isRootSurface ? (float)m_data.round : 0.0f);
+    glUniform1f(locRoundingPower, m_data.roundingPower);
+    glUniform2f(locTopLeft, transformedBox.x, transformedBox.y);
+    glUniform2f(locFullSize, transformedBox.w, transformedBox.h);
+    glUniform2f(locUvTopLeft, surf.uvTopLeft.x, surf.uvTopLeft.y);
+    glUniform2f(locUvBottomRight, surf.uvBottomRight.x, surf.uvBottomRight.y);
+    glUniform1f(locProtectBrights, m_data.protectBrights);
+    glUniform1f(locBrightThreshold, m_data.brightThreshold);
+    glUniform1f(locBrightKnee, m_data.brightKnee);
+    glUniform1f(locProtectSaturated, m_data.protectSaturated);
+    glUniform1f(locSaturationThreshold, m_data.saturationThreshold);
+    glUniform1f(locSaturationKnee, m_data.saturationKnee);
+    glUniform1i(locDebugVisualize, m_data.debugVisualize);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(surf.windowTex->m_target, surf.windowTex->m_texID);
+    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_WRAP_S,
+                    GL_CLAMP_TO_EDGE);
+    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_WRAP_T,
+                    GL_CLAMP_TO_EDGE);
+    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_MIN_FILTER,
+                    m_data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
+    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_MAG_FILTER,
+                    m_data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
+    glUniform1i(locWindowTex, 0);
+
+    CRegion surfDamage = damage;
+    surfDamage.intersect(surf.box);
+    if (m_data.clipBox.w != 0 && m_data.clipBox.h != 0)
+      surfDamage.intersect(m_data.clipBox);
+
+    for (auto &rect : surfDamage.getRects()) {
       g_pHyprOpenGL->scissor(&rect);
       glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
-  } else {
-    for (auto &rect : damage.getRects()) {
-      g_pHyprOpenGL->scissor(&rect);
-      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    }
+  }
+
+  CRegion clearRegion = damage;
+  if (m_data.clipBox.w != 0 && m_data.clipBox.h != 0)
+    clearRegion.intersect(m_data.clipBox);
+
+  glStencilMask(0x80);
+  glClearStencil(0);
+  for (auto &rect : clearRegion.getRects()) {
+    g_pHyprOpenGL->scissor(&rect);
+    glClear(GL_STENCIL_BUFFER_BIT);
   }
 
   // Restore GL state
   g_pHyprOpenGL->scissor((const pixman_box32 *)nullptr);
   glBindVertexArray(prevVAO);
   glActiveTexture(prevActiveTexture);
-  glBindTexture(isExternal ? GL_TEXTURE_EXTERNAL_OES : GL_TEXTURE_2D, prevTex);
+  glBindTexture(GL_TEXTURE_2D, prevTex2D);
+  glBindTexture(GL_TEXTURE_EXTERNAL_OES, prevTexExternal);
   glUseProgram(prevProgram);
+  if (prevStencilEnabled)
+    glEnable(GL_STENCIL_TEST);
+  else
+    glDisable(GL_STENCIL_TEST);
+  glStencilFunc(prevStencilFunc, prevStencilRef, prevStencilValueMask);
+  glStencilOp(prevStencilFail, prevStencilPassDepthFail,
+              prevStencilPassDepthPass);
+  glStencilMask(prevStencilWriteMask);
+  glClearStencil(prevStencilClearValue);
 }
 
 // ── Config helpers ──
@@ -673,18 +714,18 @@ static void updateConfig() {
       getCfgFloat("plugin:darkwindow:protect_brights", 1.00f);
   g_config.bright_threshold =
       getCfgFloat("plugin:darkwindow:bright_threshold", 0.82f);
-  g_config.bright_knee =
-      getCfgFloat("plugin:darkwindow:bright_knee", 0.12f);
+  g_config.bright_knee = getCfgFloat("plugin:darkwindow:bright_knee", 0.12f);
   g_config.protect_saturated =
       getCfgFloat("plugin:darkwindow:protect_saturated", 0.85f);
   g_config.saturation_threshold =
       getCfgFloat("plugin:darkwindow:saturation_threshold", 0.20f);
   g_config.saturation_knee =
       getCfgFloat("plugin:darkwindow:saturation_knee", 0.16f);
-  g_config.debug_visualize =
-      getCfgInt("plugin:darkwindow:debug_visualize", 0);
+  g_config.debug_visualize = getCfgInt("plugin:darkwindow:debug_visualize", 0);
   g_config.enable_on_fullscreen =
       getCfgInt("plugin:darkwindow:enable_on_fullscreen", 1);
+  g_config.tint_all_surfaces =
+      getCfgInt("plugin:darkwindow:tint_all_surfaces", 1);
 }
 
 static bool isShaded(PHLWINDOW pWindow) {
@@ -705,13 +746,12 @@ static void onRenderStage(eRenderStage stage) {
     if (!g_shadersCompiled) {
       g_shadersCompiled = compileChromaShaders();
       if (g_shadersCompiled && !g_loggedShaderInit) {
-        Log::logger->log(
-            Log::INFO,
-            "[Hyprchroma] Shader path initialized successfully");
+        Log::logger->log(Log::INFO,
+                         "[Hyprchroma] Shader path initialized successfully");
         g_loggedShaderInit = true;
       } else if (!g_shadersCompiled)
         Log::logger->log(Log::ERR, "[Hyprchroma] Shader compilation failed, "
-                        "falling back to uniform tint");
+                                   "falling back to uniform tint");
     }
     return;
   }
@@ -761,14 +801,30 @@ static void onRenderStage(eRenderStage stage) {
   // Try v4 path: per-surface luminance tint
   auto clipBox = g_pHyprOpenGL->m_renderData.clipBox;
   bool useNearestNeighbor = g_pHyprOpenGL->m_renderData.useNearestNeighbor;
-  std::vector<CChromaPassElement::SChromaData> chromaPasses;
+  CChromaPassElement::SChromaData chromaData;
+  chromaData.clipBox = clipBox;
+  chromaData.tintR = g_config.r;
+  chromaData.tintG = g_config.g;
+  chromaData.tintB = g_config.b;
+  chromaData.tintStrength = g_config.a;
+  chromaData.windowAlpha = windowAlpha;
+  chromaData.round = round;
+  chromaData.roundingPower = rPower;
+  chromaData.useNearestNeighbor = useNearestNeighbor;
+  chromaData.protectBrights = g_config.protect_brights;
+  chromaData.brightThreshold = g_config.bright_threshold;
+  chromaData.brightKnee = g_config.bright_knee;
+  chromaData.protectSaturated = g_config.protect_saturated;
+  chromaData.saturationThreshold = g_config.saturation_threshold;
+  chromaData.saturationKnee = g_config.saturation_knee;
+  chromaData.debugVisualize = g_config.debug_visualize;
   if (g_shadersCompiled) {
     auto rootSurface = window->resource();
     if (!rootSurface) {
       if (!g_loggedFallbackNoSurface) {
-        Log::logger->log(
-            Log::WARN,
-            "[Hyprchroma] Window has no root surface at RENDER_POST_WINDOW, using uniform fallback");
+        Log::logger->log(Log::WARN,
+                         "[Hyprchroma] Window has no root surface at "
+                         "RENDER_POST_WINDOW, using uniform fallback");
         g_loggedFallbackNoSurface = true;
       }
     } else {
@@ -786,103 +842,90 @@ static void onRenderStage(eRenderStage stage) {
               if (!g_loggedFallbackNoExternalProgram) {
                 Log::logger->log(
                     Log::WARN,
-                    "[Hyprchroma] External texture encountered without external shader support, skipping that surface");
+                    "[Hyprchroma] External texture encountered without "
+                    "external shader support, skipping that surface");
                 g_loggedFallbackNoExternalProgram = true;
               }
               return;
             }
 
             auto logicalSize = surface->m_current.size;
-            if (logicalSize.x <= 1 || logicalSize.y <= 1)
-              logicalSize = surface->m_current.bufferSize;
-
-            if (logicalSize.x <= 1 || logicalSize.y <= 1)
+            const bool hasLogicalSize =
+                (logicalSize.x > 1.1f && logicalSize.y > 1.1f);
+            const bool isRootSurface = surface == rootSurface;
+            if (!g_config.tint_all_surfaces && !isRootSurface)
               return;
 
-            const bool isRootSurface = surface == rootSurface;
-            CChromaPassElement::SChromaData data;
-            data.box = CBox(
+            CChromaPassElement::SSurfaceData sdata;
+            sdata.windowTex = tex;
+            sdata.box = CBox(
                 (logBox.x + offset.x + renderOffset.x - monitor->m_position.x) *
                     scale,
                 (logBox.y + offset.y + renderOffset.y - monitor->m_position.y) *
                     scale,
-                logicalSize.x * scale, logicalSize.y * scale);
-            data.clipBox = isRootSurface ? clipBox : CBox{};
-            data.tintR = g_config.r;
-            data.tintG = g_config.g;
-            data.tintB = g_config.b;
-            data.tintStrength = g_config.a;
-            data.windowAlpha = windowAlpha;
-            data.round = isRootSurface ? round : 0;
-            data.roundingPower = rPower;
-            data.useNearestNeighbor = useNearestNeighbor;
-            data.uvTopLeft = Vector2D(0.F, 0.F);
-            data.uvBottomRight = Vector2D(1.F, 1.F);
-            data.protectBrights = g_config.protect_brights;
-            data.brightThreshold = g_config.bright_threshold;
-            data.brightKnee = g_config.bright_knee;
-            data.protectSaturated = g_config.protect_saturated;
-            data.saturationThreshold = g_config.saturation_threshold;
-            data.saturationKnee = g_config.saturation_knee;
-            data.debugVisualize = g_config.debug_visualize;
-            data.isRootSurface = isRootSurface;
-            data.windowTex = tex;
-            chromaPasses.push_back(std::move(data));
+                hasLogicalSize ? logicalSize.x * scale
+                               : surface->m_current.bufferSize.x,
+                hasLogicalSize ? logicalSize.y * scale
+                               : surface->m_current.bufferSize.y);
+            sdata.isRootSurface = isRootSurface;
+            chromaData.surfaces.push_back(std::move(sdata));
           },
           nullptr);
 
-      if (chromaPasses.empty() && !g_loggedFallbackNoTexture) {
-        Log::logger->log(
-            Log::WARN,
-            "[Hyprchroma] No usable surface textures collected for window, using uniform fallback");
+      if (chromaData.surfaces.empty() && !g_loggedFallbackNoTexture) {
+        Log::logger->log(Log::WARN,
+                         "[Hyprchroma] No usable surface textures collected "
+                         "for window, using uniform fallback");
         g_loggedFallbackNoTexture = true;
       }
     }
   }
 
-  if (!chromaPasses.empty()) {
+  if (!chromaData.surfaces.empty()) {
     if (g_config.debug_visualize > 0 && !g_notifiedShaderDebugPath) {
-      HyprlandAPI::addNotification(
-          pHandle, "[DarkWindow] Debug: shader path active",
-          CHyprColor(0.2f, 1.0f, 0.2f, 1.0f), 2500);
+      HyprlandAPI::addNotification(pHandle,
+                                   "[DarkWindow] Debug: shader path active",
+                                   CHyprColor(0.2f, 1.0f, 0.2f, 1.0f), 2500);
       g_notifiedShaderDebugPath = true;
     }
     if (g_config.debug_visualize == 6 && !g_notifiedSurfaceDebugCount) {
       HyprlandAPI::addNotification(
           pHandle,
-          std::format("[DarkWindow] Debug: {} surface(s) traced", chromaPasses.size()),
+          std::format("[DarkWindow] Debug: {} surface(s) traced",
+                      chromaData.surfaces.size()),
           CHyprColor(0.9f, 0.9f, 0.2f, 1.0f), 3500);
       g_notifiedSurfaceDebugCount = true;
     }
     if (!g_loggedShaderPath) {
-      Log::logger->log(
-          Log::INFO,
-          "[Hyprchroma] Using per-surface shader tint path (surfaces={}, clip={}x{})",
-          chromaPasses.size(), clipBox.w, clipBox.h);
+      Log::logger->log(Log::INFO,
+                       "[Hyprchroma] Using grouped shader tint path "
+                       "(surfaces={}, clip={}x{})",
+                       chromaData.surfaces.size(), clipBox.w, clipBox.h);
       g_loggedShaderPath = true;
     }
-    for (const auto &data : chromaPasses) {
-      g_pHyprRenderer->m_renderPass.add(makeUnique<CChromaPassElement>(data));
-      if (g_config.debug_visualize == 6) {
+    g_pHyprRenderer->m_renderPass.add(
+        makeUnique<CChromaPassElement>(chromaData));
+    if (g_config.debug_visualize == 6) {
+      for (const auto &surf : chromaData.surfaces) {
         CRectPassElement::SRectData debugRect;
-        debugRect.box = data.box;
-        debugRect.color = data.isRootSurface
+        debugRect.box = surf.box;
+        debugRect.color = surf.isRootSurface
                               ? CHyprColor(0.15f, 1.0f, 0.2f, 0.12f)
                               : CHyprColor(1.0f, 0.55f, 0.05f, 0.12f);
-        debugRect.round = data.round;
-        debugRect.roundingPower = data.roundingPower;
+        debugRect.round = surf.isRootSurface ? round : 0;
+        debugRect.roundingPower = rPower;
         g_pHyprRenderer->m_renderPass.add(
             makeUnique<CRectPassElement>(debugRect));
 
         CBorderPassElement::SBorderData border;
-        border.box = data.box;
+        border.box = surf.box;
         border.grad1 = CGradientValueData(
-            data.isRootSurface ? CHyprColor(0.2f, 1.0f, 0.25f, 1.0f)
+            surf.isRootSurface ? CHyprColor(0.2f, 1.0f, 0.25f, 1.0f)
                                : CHyprColor(1.0f, 0.65f, 0.15f, 1.0f));
         border.a = 1.0f;
-        border.round = data.round;
+        border.round = surf.isRootSurface ? round : 0;
         border.borderSize = std::max(4, (int)std::round(6.F * scale));
-        border.roundingPower = data.roundingPower;
+        border.roundingPower = rPower;
         g_pHyprRenderer->m_renderPass.add(
             makeUnique<CBorderPassElement>(border));
       }
@@ -910,7 +953,8 @@ static void onRenderStage(eRenderStage stage) {
       debugRect.color = CHyprColor(1.0f, 0.0f, 0.5f, 0.10f);
       debugRect.round = round;
       debugRect.roundingPower = rPower;
-      g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(debugRect));
+      g_pHyprRenderer->m_renderPass.add(
+          makeUnique<CRectPassElement>(debugRect));
 
       CBorderPassElement::SBorderData border;
       border.box = overlayBox;
@@ -944,8 +988,14 @@ static SDispatchResult shadeDispatcher(std::string args) {
     addrStr.erase(addrStr.find_last_not_of(" \t\n\r") + 1);
 
     for (auto &w : g_pCompositor->m_windows) {
-      if (std::format("0x{:x}", (uintptr_t)w.get()) == addrStr ||
-          std::format("{:x}", (uintptr_t)w.get()) == addrStr) {
+      std::ostringstream ss;
+      ss << "0x" << std::hex << (uintptr_t)w.get();
+      std::string currentHex = ss.str();
+      std::ostringstream ss2;
+      ss2 << std::hex << (uintptr_t)w.get();
+      std::string currentHexShort = ss2.str();
+
+      if (currentHex == addrStr || currentHexShort == addrStr) {
         target = w;
         break;
       }
@@ -1000,17 +1050,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
                               Hyprlang::FLOAT{0.82f});
   HyprlandAPI::addConfigValue(handle, "plugin:darkwindow:bright_knee",
                               Hyprlang::FLOAT{0.12f});
-  HyprlandAPI::addConfigValue(handle,
-                              "plugin:darkwindow:protect_saturated",
+  HyprlandAPI::addConfigValue(handle, "plugin:darkwindow:protect_saturated",
                               Hyprlang::FLOAT{0.85f});
-  HyprlandAPI::addConfigValue(handle,
-                              "plugin:darkwindow:saturation_threshold",
+  HyprlandAPI::addConfigValue(handle, "plugin:darkwindow:saturation_threshold",
                               Hyprlang::FLOAT{0.20f});
   HyprlandAPI::addConfigValue(handle, "plugin:darkwindow:saturation_knee",
                               Hyprlang::FLOAT{0.16f});
   HyprlandAPI::addConfigValue(handle, "plugin:darkwindow:debug_visualize",
                               Hyprlang::INT{0});
   HyprlandAPI::addConfigValue(handle, "plugin:darkwindow:enable_on_fullscreen",
+                              Hyprlang::INT{1});
+  HyprlandAPI::addConfigValue(handle, "plugin:darkwindow:tint_all_surfaces",
                               Hyprlang::INT{1});
 
   updateConfig();
@@ -1035,10 +1085,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
                                });
 
   HyprlandAPI::addNotification(
-      handle, "[DarkWindow] Registered v3.2 (Adaptive chromakey tint)",
+      handle, "[DarkWindow] Registered v3.3 (Grouped adaptive chromakey tint)",
       CHyprColor(0.f, 1.f, 0.f, 1.f), 3000);
 
-  return {"DarkWindow", "Adaptive per-pixel chromakey tint", "tco", "3.2"};
+  return {"DarkWindow", "Grouped adaptive per-pixel chromakey tint", "tco",
+          "3.3"};
 }
 
 APICALL EXPORT void pluginExit() {
