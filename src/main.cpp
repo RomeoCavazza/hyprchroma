@@ -1,4 +1,4 @@
-// libhypr-darkwindow.so — Hyprchroma v3.3 for Hyprland v0.54.2
+// libhypr-darkwindow.so — Hyprchroma v3.3.1 for Hyprland v0.54.2
 //
 // Per-pixel luminance-based chromakey tint overlay.
 // Samples window surface texture to vary tint alpha: strong on dark pixels,
@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <any>
+#include <chrono>
 #include <format>
 #include <set>
 #include <sstream>
@@ -41,6 +42,7 @@ static HANDLE pHandle = nullptr;
 static CHyprSignalListener g_renderListener;
 static CHyprSignalListener g_configListener;
 static CHyprSignalListener g_destroyWindowListener;
+static CHyprSignalListener g_workspaceListener;
 
 // Glass state
 static bool g_globalShaded = true;
@@ -60,7 +62,14 @@ struct SConfig {
   int debug_visualize;
   bool enable_on_fullscreen;
   bool tint_all_surfaces;
+  int suspend_on_workspace_switch_ms;
 } g_config;
+
+static std::chrono::steady_clock::time_point g_suspendUntil =
+    std::chrono::steady_clock::time_point::min();
+static bool g_wasSuspendedLastFrame = false;
+
+static void redrawAll();
 
 // ── v3 shader state ──
 
@@ -746,6 +755,9 @@ static void updateConfig() {
       getCfgInt("plugin:darkwindow:enable_on_fullscreen", 1);
   g_config.tint_all_surfaces =
       getCfgInt("plugin:darkwindow:tint_all_surfaces", 1);
+  g_config.suspend_on_workspace_switch_ms =
+      std::max(0, getCfgInt("plugin:darkwindow:suspend_on_workspace_switch_ms",
+                            150));
 }
 
 static bool isShaded(PHLWINDOW pWindow) {
@@ -761,6 +773,12 @@ static bool isShaded(PHLWINDOW pWindow) {
 static void onRenderStage(eRenderStage stage) {
   if (stage == RENDER_BEGIN) {
     g_renderedThisFrame.clear();
+
+    const bool suspendedNow =
+        std::chrono::steady_clock::now() < g_suspendUntil;
+    if (g_wasSuspendedLastFrame && !suspendedNow)
+      redrawAll();
+    g_wasSuspendedLastFrame = suspendedNow;
 
     // Lazy shader compilation (GL context guaranteed active here)
     if (!g_shadersCompiled) {
@@ -780,6 +798,9 @@ static void onRenderStage(eRenderStage stage) {
     return;
 
   if (g_config.a <= 0.0f)
+    return;
+
+  if (std::chrono::steady_clock::now() < g_suspendUntil)
     return;
 
   auto window = g_pHyprOpenGL->m_renderData.currentWindow.lock();
@@ -1141,6 +1162,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
                               Hyprlang::INT{1});
   HyprlandAPI::addConfigValue(handle, "plugin:darkwindow:tint_all_surfaces",
                               Hyprlang::INT{1});
+  HyprlandAPI::addConfigValue(
+      handle, "plugin:darkwindow:suspend_on_workspace_switch_ms",
+      Hyprlang::INT{150});
 
   updateConfig();
 
@@ -1153,6 +1177,16 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
   g_destroyWindowListener = Event::bus()->m_events.window.destroy.listen(
       [](PHLWINDOW w) { g_perWindowShaded.erase((void *)w.get()); });
 
+  g_workspaceListener = Event::bus()->m_events.workspace.active.listen(
+      [](const PHLWORKSPACE &) {
+        if (g_config.suspend_on_workspace_switch_ms <= 0)
+          return;
+        g_suspendUntil = std::chrono::steady_clock::now() +
+                         std::chrono::milliseconds(
+                             g_config.suspend_on_workspace_switch_ms);
+        redrawAll();
+      });
+
   HyprlandAPI::addDispatcherV2(handle, "togglechromakey",
                                [](std::string args) -> SDispatchResult {
                                  return shadeDispatcher(args);
@@ -1163,18 +1197,20 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
                                  return shadeDispatcher(args);
                                });
 
-  HyprlandAPI::addNotification(
-      handle, "[DarkWindow] Registered v3.3 (Grouped adaptive chromakey tint)",
-      CHyprColor(0.f, 1.f, 0.f, 1.f), 3000);
+  HyprlandAPI::addNotification(handle,
+                               "[DarkWindow] Registered v3.3.1 "
+                               "(Grouped adaptive chromakey tint)",
+                               CHyprColor(0.f, 1.f, 0.f, 1.f), 3000);
 
   return {"DarkWindow", "Grouped adaptive per-pixel chromakey tint", "tco",
-          "3.3"};
+          "3.3.1"};
 }
 
 APICALL EXPORT void pluginExit() {
   g_renderListener.reset();
   g_configListener.reset();
   g_destroyWindowListener.reset();
+  g_workspaceListener.reset();
   g_perWindowShaded.clear();
 
   if (g_chromaProgram) {

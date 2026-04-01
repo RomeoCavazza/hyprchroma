@@ -1,77 +1,81 @@
-## v3.3.0-v054
+# Hyprchroma v3.3.1-v054 Publishing Bundle
 
-Hyprchroma v3.3.0-v054 hardens the adaptive shader path for near pixel-perfect use on Hyprland v0.54.2.
+## Scope
 
+This patch release is intentionally small:
+
+- reduce workspace-switch tint suspension from `900 ms` to `150 ms`
+- add configurable `plugin:darkwindow:suspend_on_workspace_switch_ms`
+- smooth Hyprchroma behavior during animated workspace transitions, especially with Hyprspace
+- lighten README history/docs and update release metadata to `v3.3.1-v054`
+
+## Files to sync to `RomeoCavazza/Hyprchroma`
+
+- `src/main.cpp`
+- `README.md`
+- `RELEASE_NOTES.md`
+- `flake.nix`
+
+Optional:
+
+- `res/preview.png` only if you want new visuals
+- repo workflows only if the public repo differs from local CI
+
+Do not sync NixOS-local files:
+
+- `/etc/nixos/config/hypr/theme/hyprchroma.conf`
+- `/etc/nixos/home/tco/home.nix`
+
+## Suggested tag
+
+`v3.3.1-v054`
+
+## Suggested release title
+
+`v3.3.1-v054 — Workspace switch smoothing for Hyprland v0.54.2`
+
+## Suggested release body
+
+```md
 ## Highlights
 
-- Removed cursor-driven mask decorrelation from the fragment shaders.
-- Replaced the old one-pass-per-surface path with a grouped per-window pass.
-- Added stencil guarding so overlapping subsurfaces do not stack tint unexpectedly.
-- Kept rounded corners only on the root surface to avoid clipping child UI elements like toolbar buttons.
-- Added `plugin:darkwindow:tint_all_surfaces` to allow debugging root-only tinting if needed.
-- Discarded fully transparent sampled pixels so empty root areas do not steal the stencil from child controls.
-- Reversed grouped tint application to follow compositor topmost ownership instead of background-first claiming.
-- Restored viewport-aware UV handling for cropped or source-boxed surfaces.
-- Cleared stencil state before and after grouped draws to avoid stale frame-to-frame claims.
-- Added a small damage safety pad to reduce edge artifacts on top and left margins.
+- Adds `plugin:darkwindow:suspend_on_workspace_switch_ms`
+- Reduces the default workspace-switch tint suspension to `150 ms`
+- Prevents stale blue chroma carry-over during animated workspace transitions
+- Keeps the grouped adaptive shader path introduced in `v3.3.0-v054`
 
 ## Why this release exists
 
-v3.2.0-v054 introduced the adaptive per-surface shader path, but difficult layouts could still expose artifacts:
+Some animated workspace transitions could keep the previous workspace visually alive for a short time while Hyprchroma was still shading it. In practice, that looked like a lingering blue glow from the old workspace.
 
-- dark pages with dense controls
-- half-tiled windows
-- areas near top and left edges
+`v3.3.1-v054` adds a tiny configurable suspension window after `workspace.active` events so tinting drops out during the transition and returns cleanly once the new workspace settles.
 
-The underlying issue was not just repaint timing. The previous pipeline also allowed the visible mask to depend on cursor position, and it rendered surfaces independently in a way that could exaggerate artifacts in complex UI regions.
+## New config
 
-v3.3 removes that cursor dependency and switches to a grouped render model that is much more stable on real applications like GitHub and other dark UIs.
-
-## Render model
-
-```text
-v3.2
-  Window
-    -> breadth-first surface traversal
-    -> independent pass per usable surface
-    -> optional cursor-driven mask perturbation
-
-v3.3
-  Window
-    -> breadth-first surface traversal
-    -> grouped adaptive pass for the whole window
-    -> stencil guard prevents stacked tinting
-    -> no cursor-driven mask perturbation
-    -> viewport-aware UV sampling
-    -> transparent pixels do not claim ownership
+```conf
+plugin:darkwindow:suspend_on_workspace_switch_ms = 150
 ```
+
+Set it to `0` to disable the behavior entirely.
 
 ## Compatibility
 
 - Target Hyprland: `v0.54.2`
-- Tested stack:
-  - Hyprland `59f9f268`
-  - Hyprutils `0.11.0`
-  - Hyprlang `0.6.8`
-  - Aquamarine `0.10.0`
-  - NixOS `26.05 (Yarara)`
-
-## Upgrade note
-
-Existing `plugin:darkwindow:*` settings remain compatible.
-
-If you want the most conservative path for debugging, you can temporarily set:
-
-```conf
-plugin:darkwindow:tint_all_surfaces = 0
+- Existing `plugin:darkwindow:*` settings remain compatible
 ```
 
-The default remains `1`.
+## Publish checklist
 
-Recommended shipping baseline:
+1. Sync the four files above into `RomeoCavazza/Hyprchroma`
+2. Commit with something like:
+   `release: cut v3.3.1-v054`
+3. Tag:
+   `git tag v3.3.1-v054`
+4. Push branch + tag
+5. Create GitHub release using the body above
 
-```conf
-plugin:darkwindow:tint_strength = 0.058
-plugin:darkwindow:enable_on_fullscreen = 0
-plugin:darkwindow:tint_all_surfaces = 1
-```
+## Local verification already done
+
+`nix build /etc/nixos/home/tco/pkgs/Hyprchroma-fork#hyprchroma -L`
+
+Result: passes as `hyprchroma-3.3.1-v054`
