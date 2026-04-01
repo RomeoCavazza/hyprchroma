@@ -167,6 +167,9 @@ layout(location = 0) out vec4 fragColor;
 void main() {
     vec2 sampleUV = mix(uvTopLeft, uvBottomRight, v_texcoord);
     vec4 windowPixel = texture(windowTex, sampleUV);
+    float contentAlpha = windowPixel.a;
+    if (contentAlpha <= 0.001)
+        discard;
     float luminance = dot(windowPixel.rgb, vec3(0.2126, 0.7152, 0.0722));
     float maxChannel = max(windowPixel.r, max(windowPixel.g, windowPixel.b));
     float minChannel = min(windowPixel.r, min(windowPixel.g, windowPixel.b));
@@ -183,7 +186,7 @@ void main() {
         saturation
     );
     float preserve = clamp(max(brightProtect, saturatedProtect), 0.0, 1.0);
-    float alpha = tintStrength * (1.0 - preserve) * (1.0 - luminance) * windowAlpha;
+    float alpha = tintStrength * (1.0 - preserve) * (1.0 - luminance) * windowAlpha * contentAlpha;
     alpha = clamp(alpha, 0.0, 1.0);
 
     if (debugVisualize == 1) {
@@ -267,6 +270,9 @@ layout(location = 0) out vec4 fragColor;
 void main() {
     vec2 sampleUV = mix(uvTopLeft, uvBottomRight, v_texcoord);
     vec4 windowPixel = texture(windowTex, sampleUV);
+    float contentAlpha = windowPixel.a;
+    if (contentAlpha <= 0.001)
+        discard;
     float luminance = dot(windowPixel.rgb, vec3(0.2126, 0.7152, 0.0722));
     float maxChannel = max(windowPixel.r, max(windowPixel.g, windowPixel.b));
     float minChannel = min(windowPixel.r, min(windowPixel.g, windowPixel.b));
@@ -283,7 +289,7 @@ void main() {
         saturation
     );
     float preserve = clamp(max(brightProtect, saturatedProtect), 0.0, 1.0);
-    float alpha = tintStrength * (1.0 - preserve) * (1.0 - luminance) * windowAlpha;
+    float alpha = tintStrength * (1.0 - preserve) * (1.0 - luminance) * windowAlpha * contentAlpha;
     alpha = clamp(alpha, 0.0, 1.0);
 
     if (debugVisualize == 1) {
@@ -490,6 +496,7 @@ public:
   };
 
   struct SChromaData {
+    CBox box;
     CBox clipBox;
     float tintR, tintG, tintB;
     float tintStrength;
@@ -516,7 +523,7 @@ public:
   virtual bool needsLiveBlur() override { return false; }
   virtual bool needsPrecomputeBlur() override { return false; }
   virtual const char *passName() override { return "CChromaPassElement"; }
-  virtual std::optional<CBox> boundingBox() override { return m_data.clipBox; }
+  virtual std::optional<CBox> boundingBox() override { return m_data.box; }
 
 private:
   SChromaData m_data;
@@ -525,6 +532,8 @@ private:
 void CChromaPassElement::draw(const CRegion &damage) {
   if (m_data.surfaces.empty())
     return;
+
+  static constexpr double DAMAGE_PAD = 1.0;
 
   auto pMonitor = g_pHyprOpenGL->m_renderData.pMonitor.lock();
   if (!pMonitor)
@@ -563,6 +572,20 @@ void CChromaPassElement::draw(const CRegion &damage) {
   glStencilMask(0x80);
   glStencilFunc(GL_NOTEQUAL, 0x80, 0x80);
   glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+
+  CRegion clearRegion = damage.copy().expand(DAMAGE_PAD);
+  clearRegion.intersect(m_data.box.copy().round().expand(DAMAGE_PAD));
+  if (m_data.clipBox.w != 0 && m_data.clipBox.h != 0)
+    clearRegion.intersect(m_data.clipBox.copy().round().expand(DAMAGE_PAD));
+
+  // Clear our stencil bit before drawing so stale claims from previous frames
+  // cannot punch holes in the current frame.
+  glStencilMask(0x80);
+  glClearStencil(0);
+  for (auto &rect : clearRegion.getRects()) {
+    g_pHyprOpenGL->scissor(&rect);
+    glClear(GL_STENCIL_BUFFER_BIT);
+  }
 
   for (const auto &surf : m_data.surfaces) {
     const bool isExternal =
@@ -649,10 +672,10 @@ void CChromaPassElement::draw(const CRegion &damage) {
                     m_data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
     glUniform1i(locWindowTex, 0);
 
-    CRegion surfDamage = damage;
-    surfDamage.intersect(surf.box);
+    CRegion surfDamage = damage.copy().expand(DAMAGE_PAD);
+    surfDamage.intersect(surf.box.copy().round().expand(DAMAGE_PAD));
     if (m_data.clipBox.w != 0 && m_data.clipBox.h != 0)
-      surfDamage.intersect(m_data.clipBox);
+      surfDamage.intersect(m_data.clipBox.copy().round().expand(DAMAGE_PAD));
 
     for (auto &rect : surfDamage.getRects()) {
       g_pHyprOpenGL->scissor(&rect);
@@ -660,10 +683,7 @@ void CChromaPassElement::draw(const CRegion &damage) {
     }
   }
 
-  CRegion clearRegion = damage;
-  if (m_data.clipBox.w != 0 && m_data.clipBox.h != 0)
-    clearRegion.intersect(m_data.clipBox);
-
+  // Clear again after drawing so later passes start from a clean stencil state.
   glStencilMask(0x80);
   glClearStencil(0);
   for (auto &rect : clearRegion.getRects()) {
@@ -802,6 +822,7 @@ static void onRenderStage(eRenderStage stage) {
   auto clipBox = g_pHyprOpenGL->m_renderData.clipBox;
   bool useNearestNeighbor = g_pHyprOpenGL->m_renderData.useNearestNeighbor;
   CChromaPassElement::SChromaData chromaData;
+  chromaData.box = overlayBox;
   chromaData.clipBox = clipBox;
   chromaData.tintR = g_config.r;
   chromaData.tintG = g_config.g;
@@ -856,6 +877,18 @@ static void onRenderStage(eRenderStage stage) {
             if (!g_config.tint_all_surfaces && !isRootSurface)
               return;
 
+            Vector2D projectedSize;
+            if (surface->m_current.viewport.hasDestination)
+              projectedSize =
+                  (surface->m_current.viewport.destination * scale).round();
+            else if (surface->m_current.viewport.hasSource)
+              projectedSize =
+                  (surface->m_current.viewport.source.size() * scale).round();
+            else if (hasLogicalSize)
+              projectedSize = (logicalSize * scale).round();
+            else
+              projectedSize = surface->m_current.bufferSize;
+
             CChromaPassElement::SSurfaceData sdata;
             sdata.windowTex = tex;
             sdata.box = CBox(
@@ -863,11 +896,38 @@ static void onRenderStage(eRenderStage stage) {
                     scale,
                 (logBox.y + offset.y + renderOffset.y - monitor->m_position.y) *
                     scale,
-                hasLogicalSize ? logicalSize.x * scale
-                               : surface->m_current.bufferSize.x,
-                hasLogicalSize ? logicalSize.y * scale
-                               : surface->m_current.bufferSize.y);
+                projectedSize.x, projectedSize.y);
             sdata.isRootSurface = isRootSurface;
+
+            if (isRootSurface &&
+                g_pHyprOpenGL->m_renderData.primarySurfaceUVTopLeft !=
+                    Vector2D(-1, -1) &&
+                g_pHyprOpenGL->m_renderData.primarySurfaceUVBottomRight !=
+                    Vector2D(-1, -1)) {
+              sdata.uvTopLeft =
+                  g_pHyprOpenGL->m_renderData.primarySurfaceUVTopLeft;
+              sdata.uvBottomRight =
+                  g_pHyprOpenGL->m_renderData.primarySurfaceUVBottomRight;
+            } else if (surface->m_current.viewport.hasSource &&
+                       surface->m_current.bufferSize.x > 0.F &&
+                       surface->m_current.bufferSize.y > 0.F) {
+              const auto &bufferSize = surface->m_current.bufferSize;
+              const auto &bufferSource = surface->m_current.viewport.source;
+              sdata.uvTopLeft = Vector2D(bufferSource.x / bufferSize.x,
+                                         bufferSource.y / bufferSize.y);
+              sdata.uvBottomRight =
+                  Vector2D((bufferSource.x + bufferSource.width) /
+                               bufferSize.x,
+                           (bufferSource.y + bufferSource.height) /
+                               bufferSize.y);
+
+              if (sdata.uvBottomRight.x < 0.01f ||
+                  sdata.uvBottomRight.y < 0.01f) {
+                sdata.uvTopLeft = Vector2D(0.F, 0.F);
+                sdata.uvBottomRight = Vector2D(1.F, 1.F);
+              }
+            }
+
             chromaData.surfaces.push_back(std::move(sdata));
           },
           nullptr);
@@ -877,6 +937,12 @@ static void onRenderStage(eRenderStage stage) {
                          "[Hyprchroma] No usable surface textures collected "
                          "for window, using uniform fallback");
         g_loggedFallbackNoTexture = true;
+      } else if (chromaData.surfaces.size() > 1) {
+        // Hyprland queues surfaces in breadthfirst compositor order and later
+        // surfaces visually appear on top. Our stencil path is "first claim
+        // wins", so we must tint in reverse render order to let the topmost
+        // surface own the pixel before background/root surfaces can claim it.
+        std::reverse(chromaData.surfaces.begin(), chromaData.surfaces.end());
       }
     }
   }
@@ -1017,12 +1083,25 @@ static SDispatchResult shadeDispatcher(std::string args) {
                                  "[DarkWindow] Per-window shade toggled",
                                  CHyprColor(0.f, 1.f, 1.f, 1.f), 1000);
   } else {
+    const auto clearedOverrides = g_perWindowShaded.size();
+    g_perWindowShaded.clear();
+
     if (args.find("on") != std::string::npos)
       g_globalShaded = true;
     else if (args.find("off") != std::string::npos)
       g_globalShaded = false;
     else
       g_globalShaded = !g_globalShaded;
+
+    HyprlandAPI::addNotification(
+        pHandle,
+        std::format("[DarkWindow] Global shade {}{}",
+                    g_globalShaded ? "ON" : "OFF",
+                    clearedOverrides
+                        ? std::format(" (cleared {} window override(s))",
+                                      clearedOverrides)
+                        : ""),
+        CHyprColor(0.f, 1.f, 1.f, 1.f), 1500);
   }
 
   redrawAll();

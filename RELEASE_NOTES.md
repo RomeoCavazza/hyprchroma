@@ -1,6 +1,6 @@
 ## v3.3.0-v054
 
-Hyprchroma v3.3.0-v054 hardens the adaptive shader path for pixel-perfect use on Hyprland v0.54.2.
+Hyprchroma v3.3.0-v054 hardens the adaptive shader path for near pixel-perfect use on Hyprland v0.54.2.
 
 ## Highlights
 
@@ -9,6 +9,11 @@ Hyprchroma v3.3.0-v054 hardens the adaptive shader path for pixel-perfect use on
 - Added stencil guarding so overlapping subsurfaces do not stack tint unexpectedly.
 - Kept rounded corners only on the root surface to avoid clipping child UI elements like toolbar buttons.
 - Added `plugin:darkwindow:tint_all_surfaces` to allow debugging root-only tinting if needed.
+- Discarded fully transparent sampled pixels so empty root areas do not steal the stencil from child controls.
+- Reversed grouped tint application to follow compositor topmost ownership instead of background-first claiming.
+- Restored viewport-aware UV handling for cropped or source-boxed surfaces.
+- Cleared stencil state before and after grouped draws to avoid stale frame-to-frame claims.
+- Added a small damage safety pad to reduce edge artifacts on top and left margins.
 
 ## Why this release exists
 
@@ -37,6 +42,8 @@ v3.3
     -> grouped adaptive pass for the whole window
     -> stencil guard prevents stacked tinting
     -> no cursor-driven mask perturbation
+    -> viewport-aware UV sampling
+    -> transparent pixels do not claim ownership
 ```
 
 ## Compatibility
@@ -60,3 +67,11 @@ plugin:darkwindow:tint_all_surfaces = 0
 ```
 
 The default remains `1`.
+
+Recommended shipping baseline:
+
+```conf
+plugin:darkwindow:tint_strength = 0.058
+plugin:darkwindow:enable_on_fullscreen = 0
+plugin:darkwindow:tint_all_surfaces = 1
+```
