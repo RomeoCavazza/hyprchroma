@@ -1,4 +1,4 @@
-// libhypr-darkwindow.so — Hyprchroma v3.3.1 for Hyprland v0.54.2
+// libhypr-darkwindow.so — Hyprchroma v3.4.0 for Hyprland v0.54.2
 //
 // Per-pixel luminance-based chromakey tint overlay.
 // Samples window surface texture to vary tint alpha: strong on dark pixels,
@@ -9,6 +9,7 @@
 #include <any>
 #include <chrono>
 #include <format>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
@@ -24,6 +25,7 @@
 #include <hyprland/src/helpers/Color.hpp>
 #include <hyprland/src/helpers/memory/Memory.hpp>
 #include <hyprland/src/helpers/signal/Signal.hpp>
+#include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/managers/SeatManager.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
@@ -43,6 +45,8 @@ static CHyprSignalListener g_renderListener;
 static CHyprSignalListener g_configListener;
 static CHyprSignalListener g_destroyWindowListener;
 static CHyprSignalListener g_workspaceListener;
+static CHyprSignalListener g_mouseMoveListener;
+static SP<SHyprCtlCommand> g_runtimeProbeCommand;
 
 // Glass state
 static bool g_globalShaded = true;
@@ -50,6 +54,7 @@ static std::set<void *> g_perWindowShaded;
 
 // Render-local guard (reset every frame)
 static std::set<void *> g_renderedThisFrame;
+static std::set<void *> g_nativeShadedThisFrame;
 
 struct SConfig {
   float r, g, b, a;
@@ -62,30 +67,96 @@ struct SConfig {
   int debug_visualize;
   bool enable_on_fullscreen;
   bool tint_all_surfaces;
+  bool unified_window_pass;
+  bool native_surface_shader_pass;
+  int cursor_invalidation_mode;
+  int cursor_invalidation_throttle_ms;
+  int cursor_invalidation_radius;
   int suspend_on_workspace_switch_ms;
 } g_config;
 
 static std::chrono::steady_clock::time_point g_suspendUntil =
     std::chrono::steady_clock::time_point::min();
+static std::chrono::steady_clock::time_point g_lastCursorInvalidation =
+    std::chrono::steady_clock::time_point::min();
 static bool g_wasSuspendedLastFrame = false;
+static bool g_runtimeProbeSafeForLowerLevel = false;
 
 static void redrawAll();
+
+struct SRuntimeSymbolProbe {
+  std::string query;
+  std::string demangledFilter;
+  std::vector<SFunctionMatch> matches;
+};
+
+struct SRuntimeProbeReport {
+  SVersionInfo runtimeVersion;
+  bool hashMatchesBuild = false;
+  bool tagMatchesBuild = false;
+  bool modernRenderAPIHeadersPresent = true;
+  bool eventBusRenderStagePresent = true;
+  bool preWindowStagePresent = true;
+  bool postWindowStagePresent = true;
+  bool currentWindowRenderDataPresent = true;
+  bool legacyShaderSwapABIAvailable = false;
+  SRuntimeSymbolProbe useShader;
+  SRuntimeSymbolProbe getSurfaceShader;
+  SRuntimeSymbolProbe renderTexture;
+  SRuntimeSymbolProbe renderTextureInternalWithDamage;
+  SRuntimeSymbolProbe decorationGetDataFor;
+  bool supportsModernShaderInsertion = false;
+  bool supportsDecorationHook = false;
+  bool safeForLowerLevelPrototype = false;
+  std::string recommendation;
+};
+
+struct SNativeShaderUniforms {
+  GLint tintColor = -1;
+  GLint tintStrength = -1;
+  GLint protectBrights = -1;
+  GLint brightThreshold = -1;
+  GLint brightKnee = -1;
+  GLint protectSaturated = -1;
+  GLint saturationThreshold = -1;
+  GLint saturationKnee = -1;
+  GLint debugVisualize = -1;
+};
+
+struct SNativeShaderVariant {
+  SP<CShader> shader;
+  SNativeShaderUniforms uniforms;
+};
 
 // ── v3 shader state ──
 
 static GLuint g_chromaProgram = 0;
 static GLuint g_chromaProgram_ext = 0;
+static GLuint g_blitProgram = 0;
+static GLuint g_blitProgram_ext = 0;
 static GLuint g_chromaVAO = 0;
 static GLuint g_chromaVBO = 0;
 static bool g_shadersCompiled = false;
 static bool g_loggedShaderInit = false;
 static bool g_loggedShaderPath = false;
+static bool g_loggedUnifiedPath = false;
+static bool g_loggedNativeShaderPath = false;
+static bool g_loggedNativeHooks = false;
+static bool g_loggedNativeFlagBlocked = false;
 static bool g_loggedFallbackNoSurface = false;
 static bool g_loggedFallbackNoTexture = false;
 static bool g_loggedFallbackNoExternalProgram = false;
+static bool g_loggedUnifiedFallbackNoExternalProgram = false;
+static bool g_loggedCursorInvalidationMode = false;
 static bool g_notifiedShaderDebugPath = false;
 static bool g_notifiedFallbackDebugPath = false;
 static bool g_notifiedSurfaceDebugCount = false;
+static CFunctionHook *g_getSurfaceShaderHook = nullptr;
+static CFunctionHook *g_useShaderHook = nullptr;
+static std::map<uint8_t, SNativeShaderVariant> g_nativeSurfaceShaders;
+static std::set<uint8_t> g_nativeSurfaceShaderFailures;
+static SNativeShaderVariant g_nativeExtShader;
+static bool g_nativeExtShaderCompileAttempted = false;
 
 // Uniform locations — sampler2D variant
 static GLint g_loc_proj = -1;
@@ -126,6 +197,24 @@ static GLint g_loc_ext_protectSaturated = -1;
 static GLint g_loc_ext_saturationThreshold = -1;
 static GLint g_loc_ext_saturationKnee = -1;
 static GLint g_loc_ext_debugVisualize = -1;
+
+// Uniform locations — blit sampler2D variant
+static GLint g_loc_blit_targetSize = -1;
+static GLint g_loc_blit_quadTopLeft = -1;
+static GLint g_loc_blit_quadSize = -1;
+static GLint g_loc_blit_windowTex = -1;
+static GLint g_loc_blit_uvTopLeft = -1;
+static GLint g_loc_blit_uvBottomRight = -1;
+static GLint g_loc_blit_opacity = -1;
+
+// Uniform locations — blit samplerExternalOES variant
+static GLint g_loc_blit_ext_targetSize = -1;
+static GLint g_loc_blit_ext_quadTopLeft = -1;
+static GLint g_loc_blit_ext_quadSize = -1;
+static GLint g_loc_blit_ext_windowTex = -1;
+static GLint g_loc_blit_ext_uvTopLeft = -1;
+static GLint g_loc_blit_ext_uvBottomRight = -1;
+static GLint g_loc_blit_ext_opacity = -1;
 
 // ── GLSL shaders ──
 
@@ -349,7 +438,527 @@ void main() {
 }
 )";
 
+static const char *BLIT_VERT_SRC = R"(
+#version 300 es
+precision highp float;
+
+uniform vec2 targetSize;
+uniform vec2 quadTopLeft;
+uniform vec2 quadSize;
+
+in vec2 pos;
+in vec2 texcoord;
+
+out vec2 v_texcoord;
+
+void main() {
+    vec2 pixel = quadTopLeft + pos * quadSize;
+    vec2 ndc = vec2(
+        (pixel.x / targetSize.x) * 2.0 - 1.0,
+        1.0 - (pixel.y / targetSize.y) * 2.0
+    );
+    gl_Position = vec4(ndc, 0.0, 1.0);
+    v_texcoord = texcoord;
+}
+)";
+
+static const char *BLIT_FRAG_SRC = R"(
+#version 300 es
+precision highp float;
+
+in vec2 v_texcoord;
+
+uniform sampler2D windowTex;
+uniform vec2 uvTopLeft;
+uniform vec2 uvBottomRight;
+uniform float opacity;
+
+layout(location = 0) out vec4 fragColor;
+
+void main() {
+    vec2 sampleUV = mix(uvTopLeft, uvBottomRight, v_texcoord);
+    vec4 windowPixel = texture(windowTex, sampleUV);
+    fragColor = windowPixel * opacity;
+}
+)";
+
+static const char *BLIT_FRAG_EXT_SRC = R"(
+#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision highp float;
+
+in vec2 v_texcoord;
+
+uniform samplerExternalOES windowTex;
+uniform vec2 uvTopLeft;
+uniform vec2 uvBottomRight;
+uniform float opacity;
+
+layout(location = 0) out vec4 fragColor;
+
+void main() {
+    vec2 sampleUV = mix(uvTopLeft, uvBottomRight, v_texcoord);
+    vec4 windowPixel = texture(windowTex, sampleUV);
+    fragColor = windowPixel * opacity;
+}
+)";
+
+static const char *NATIVE_SURFACE_FRAG_SRC = R"(
+#version 300 es
+#extension GL_ARB_shading_language_include : enable
+
+precision highp float;
+in vec2 v_texcoord;
+uniform sampler2D tex;
+
+uniform float alpha;
+
+#include "discard.glsl"
+#include "tint.glsl"
+#include "rounding.glsl"
+#include "surface_CM.glsl"
+
+uniform vec3 darkwindowTintColor;
+uniform float darkwindowTintStrength;
+uniform float darkwindowProtectBrights;
+uniform float darkwindowBrightThreshold;
+uniform float darkwindowBrightKnee;
+uniform float darkwindowProtectSaturated;
+uniform float darkwindowSaturationThreshold;
+uniform float darkwindowSaturationKnee;
+uniform int darkwindowDebugVisualize;
+
+layout(location = 0) out vec4 fragColor;
+
+void main() {
+    #include "get_rgb_pixel.glsl"
+
+    vec4 analysisColor = pixColor;
+
+    #include "do_discard.glsl"
+    #include "do_CM.glsl"
+    #include "do_tint.glsl"
+    #include "do_rounding.glsl"
+
+    float luminance = dot(analysisColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+    float maxChannel = max(analysisColor.r, max(analysisColor.g, analysisColor.b));
+    float minChannel = min(analysisColor.r, min(analysisColor.g, analysisColor.b));
+    float saturation = maxChannel - minChannel;
+
+    float brightProtect = darkwindowProtectBrights * smoothstep(
+        darkwindowBrightThreshold - darkwindowBrightKnee,
+        darkwindowBrightThreshold + darkwindowBrightKnee,
+        luminance
+    );
+    float saturatedProtect = darkwindowProtectSaturated * smoothstep(
+        darkwindowSaturationThreshold - darkwindowSaturationKnee,
+        darkwindowSaturationThreshold + darkwindowSaturationKnee,
+        saturation
+    );
+    float preserve = clamp(max(brightProtect, saturatedProtect), 0.0, 1.0);
+
+    vec4 basePremul = pixColor * alpha;
+    float overlayAlpha = darkwindowTintStrength * (1.0 - preserve) * (1.0 - luminance) * basePremul.a;
+    overlayAlpha = clamp(overlayAlpha, 0.0, 1.0);
+
+    if (darkwindowDebugVisualize == 1) {
+        fragColor = vec4(vec3(luminance), 1.0);
+        return;
+    }
+    if (darkwindowDebugVisualize == 2) {
+        fragColor = vec4(vec3(saturation), 1.0);
+        return;
+    }
+    if (darkwindowDebugVisualize == 3) {
+        fragColor = vec4(vec3(preserve), 1.0);
+        return;
+    }
+    if (darkwindowDebugVisualize == 4) {
+        fragColor = vec4(vec3(overlayAlpha), 1.0);
+        return;
+    }
+    if (darkwindowDebugVisualize == 5) {
+        fragColor = vec4(analysisColor.rgb, 1.0);
+        return;
+    }
+
+    fragColor = vec4(
+        darkwindowTintColor * overlayAlpha + basePremul.rgb * (1.0 - overlayAlpha),
+        overlayAlpha + basePremul.a * (1.0 - overlayAlpha)
+    );
+}
+)";
+
+static const char *NATIVE_EXT_FRAG_SRC = R"(
+#version 300 es
+#extension GL_ARB_shading_language_include : enable
+#extension GL_OES_EGL_image_external_essl3 : require
+
+precision highp float;
+in vec2 v_texcoord;
+uniform samplerExternalOES tex;
+uniform float alpha;
+
+#include "rounding.glsl"
+
+uniform int discardOpaque;
+uniform int discardAlpha;
+uniform float discardAlphaValue;
+
+uniform int applyTint;
+uniform vec3 tint;
+
+uniform vec3 darkwindowTintColor;
+uniform float darkwindowTintStrength;
+uniform float darkwindowProtectBrights;
+uniform float darkwindowBrightThreshold;
+uniform float darkwindowBrightKnee;
+uniform float darkwindowProtectSaturated;
+uniform float darkwindowSaturationThreshold;
+uniform float darkwindowSaturationKnee;
+uniform int darkwindowDebugVisualize;
+
+layout(location = 0) out vec4 fragColor;
+
+void main() {
+    vec4 pixColor = texture(tex, v_texcoord);
+    vec4 analysisColor = pixColor;
+
+    if (discardOpaque == 1 && pixColor.a * alpha == 1.0)
+        discard;
+
+    if (discardAlpha == 1 && pixColor.a <= discardAlphaValue)
+        discard;
+
+    if (applyTint == 1)
+        pixColor.rgb *= tint;
+
+    if (radius > 0.0)
+        pixColor = rounding(pixColor);
+
+    float luminance = dot(analysisColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+    float maxChannel = max(analysisColor.r, max(analysisColor.g, analysisColor.b));
+    float minChannel = min(analysisColor.r, min(analysisColor.g, analysisColor.b));
+    float saturation = maxChannel - minChannel;
+
+    float brightProtect = darkwindowProtectBrights * smoothstep(
+        darkwindowBrightThreshold - darkwindowBrightKnee,
+        darkwindowBrightThreshold + darkwindowBrightKnee,
+        luminance
+    );
+    float saturatedProtect = darkwindowProtectSaturated * smoothstep(
+        darkwindowSaturationThreshold - darkwindowSaturationKnee,
+        darkwindowSaturationThreshold + darkwindowSaturationKnee,
+        saturation
+    );
+    float preserve = clamp(max(brightProtect, saturatedProtect), 0.0, 1.0);
+
+    vec4 basePremul = pixColor * alpha;
+    float overlayAlpha = darkwindowTintStrength * (1.0 - preserve) * (1.0 - luminance) * basePremul.a;
+    overlayAlpha = clamp(overlayAlpha, 0.0, 1.0);
+
+    if (darkwindowDebugVisualize == 1) {
+        fragColor = vec4(vec3(luminance), 1.0);
+        return;
+    }
+    if (darkwindowDebugVisualize == 2) {
+        fragColor = vec4(vec3(saturation), 1.0);
+        return;
+    }
+    if (darkwindowDebugVisualize == 3) {
+        fragColor = vec4(vec3(preserve), 1.0);
+        return;
+    }
+    if (darkwindowDebugVisualize == 4) {
+        fragColor = vec4(vec3(overlayAlpha), 1.0);
+        return;
+    }
+    if (darkwindowDebugVisualize == 5) {
+        fragColor = vec4(analysisColor.rgb, 1.0);
+        return;
+    }
+
+    fragColor = vec4(
+        darkwindowTintColor * overlayAlpha + basePremul.rgb * (1.0 - overlayAlpha),
+        overlayAlpha + basePremul.a * (1.0 - overlayAlpha)
+    );
+}
+)";
+
 // ── Shader compilation helpers ──
+
+static void replaceAllInPlace(std::string &value, const std::string &needle,
+                              const std::string &replacement) {
+  if (needle.empty())
+    return;
+
+  std::size_t start = 0;
+  while ((start = value.find(needle, start)) != std::string::npos) {
+    value.replace(start, needle.length(), replacement);
+    start += replacement.length();
+  }
+}
+
+static std::string
+preprocessShaderSource(std::string source,
+                       const std::map<std::string, std::string> &includes,
+                       const uint8_t includeDepth = 3) {
+  for (uint8_t pass = 0; pass < includeDepth; ++pass) {
+    for (const auto &[name, text] : includes)
+      replaceAllInPlace(source, "#include \"" + name + "\"", text);
+  }
+  return source;
+}
+
+static std::map<std::string, std::string>
+buildNativeSurfaceShaderIncludes(CHyprOpenGLImpl *self, const uint8_t features) {
+  auto includes = self->m_includes;
+
+  includes["get_rgb_pixel.glsl"] =
+      includes[features & SH_FEAT_RGBA ? "get_rgba_pixel.glsl"
+                                       : "get_rgbx_pixel.glsl"];
+
+  if (!(features & SH_FEAT_DISCARD)) {
+    includes["discard.glsl"] = "";
+    includes["do_discard.glsl"] = "";
+  }
+  if (!(features & SH_FEAT_TINT)) {
+    includes["tint.glsl"] = "";
+    includes["do_tint.glsl"] = "";
+  }
+  if (!(features & SH_FEAT_ROUNDING)) {
+    includes["rounding.glsl"] = "";
+    includes["do_rounding.glsl"] = "";
+  }
+  if (!(features & SH_FEAT_CM)) {
+    includes["surface_CM.glsl"] = "";
+    includes["CM.glsl"] = "";
+    includes["do_CM.glsl"] = "";
+  }
+  if (!(features & SH_FEAT_TONEMAP)) {
+    includes["tonemap.glsl"] = "";
+    includes["do_tonemap.glsl"] = "";
+  }
+  if (!(features & SH_FEAT_SDR_MOD)) {
+    includes["sdr_mod.glsl"] = "";
+    includes["do_sdr_mod.glsl"] = "";
+  }
+  if (!(features & SH_FEAT_TONEMAP || features & SH_FEAT_SDR_MOD))
+    includes["primaries_xyz.glsl"] = includes["primaries_xyz_const.glsl"];
+
+  return includes;
+}
+
+static void
+queryNativeUniformLocations(const GLuint program, SNativeShaderUniforms &uniforms) {
+  uniforms.tintColor = glGetUniformLocation(program, "darkwindowTintColor");
+  uniforms.tintStrength =
+      glGetUniformLocation(program, "darkwindowTintStrength");
+  uniforms.protectBrights =
+      glGetUniformLocation(program, "darkwindowProtectBrights");
+  uniforms.brightThreshold =
+      glGetUniformLocation(program, "darkwindowBrightThreshold");
+  uniforms.brightKnee = glGetUniformLocation(program, "darkwindowBrightKnee");
+  uniforms.protectSaturated =
+      glGetUniformLocation(program, "darkwindowProtectSaturated");
+  uniforms.saturationThreshold =
+      glGetUniformLocation(program, "darkwindowSaturationThreshold");
+  uniforms.saturationKnee =
+      glGetUniformLocation(program, "darkwindowSaturationKnee");
+  uniforms.debugVisualize =
+      glGetUniformLocation(program, "darkwindowDebugVisualize");
+}
+
+static void passNativeUniforms(const SNativeShaderUniforms &uniforms) {
+  if (uniforms.tintColor != -1)
+    glUniform3f(uniforms.tintColor, g_config.r, g_config.g, g_config.b);
+  if (uniforms.tintStrength != -1)
+    glUniform1f(uniforms.tintStrength, g_config.a);
+  if (uniforms.protectBrights != -1)
+    glUniform1f(uniforms.protectBrights, g_config.protect_brights);
+  if (uniforms.brightThreshold != -1)
+    glUniform1f(uniforms.brightThreshold, g_config.bright_threshold);
+  if (uniforms.brightKnee != -1)
+    glUniform1f(uniforms.brightKnee, g_config.bright_knee);
+  if (uniforms.protectSaturated != -1)
+    glUniform1f(uniforms.protectSaturated, g_config.protect_saturated);
+  if (uniforms.saturationThreshold != -1)
+    glUniform1f(uniforms.saturationThreshold, g_config.saturation_threshold);
+  if (uniforms.saturationKnee != -1)
+    glUniform1f(uniforms.saturationKnee, g_config.saturation_knee);
+  if (uniforms.debugVisualize != -1)
+    glUniform1i(uniforms.debugVisualize, g_config.debug_visualize);
+}
+
+static PHLWINDOW currentWindowForNativePath(CHyprOpenGLImpl *self) {
+  if (!self)
+    return nullptr;
+  return self->m_renderData.currentWindow.lock();
+}
+
+static bool shouldUseNativeSurfaceShader(CHyprOpenGLImpl *self,
+                                         const PHLWINDOW &window) {
+  if (!self || !window)
+    return false;
+  if (!g_config.native_surface_shader_pass)
+    return false;
+  if (!g_runtimeProbeSafeForLowerLevel)
+    return false;
+  if (g_config.a <= 0.0f)
+    return false;
+  if (g_config.debug_visualize == 6)
+    return false;
+//  if (!isShaded(window))
+//    return false;
+  if (!g_config.enable_on_fullscreen && window->isFullscreen())
+    return false;
+  if (window->isHidden())
+    return false;
+
+  const auto workspace = window->m_workspace;
+  if (!workspace || !workspace->m_visible)
+    return false;
+
+  if (std::chrono::steady_clock::now() < g_suspendUntil)
+    return false;
+
+  if (!g_config.tint_all_surfaces) {
+    const auto rootSurface = window->resource();
+    if (!rootSurface || self->m_renderData.surface != rootSurface)
+      return false;
+  }
+
+  return true;
+}
+
+static SNativeShaderVariant *
+getNativeSurfaceShaderVariant(CHyprOpenGLImpl *self, const uint8_t features) {
+  if (!self || !self->m_shaders || self->m_shaders->TEXVERTSRC.empty())
+    return nullptr;
+
+  if (g_nativeSurfaceShaderFailures.contains(features))
+    return nullptr;
+
+  if (auto it = g_nativeSurfaceShaders.find(features);
+      it != g_nativeSurfaceShaders.end())
+    return &it->second;
+
+  auto shader = makeShared<CShader>();
+  const auto includes = buildNativeSurfaceShaderIncludes(self, features);
+  const auto fragment =
+      preprocessShaderSource(NATIVE_SURFACE_FRAG_SRC, includes);
+
+  if (!shader->createProgram(self->m_shaders->TEXVERTSRC, fragment, true, true)) {
+    Log::logger->log(
+        Log::WARN,
+        "[Hyprchroma] Native surface shader compilation failed for feature "
+        "set {}, falling back to post-window tint",
+        features);
+    g_nativeSurfaceShaderFailures.insert(features);
+    return nullptr;
+  }
+
+  SNativeShaderVariant variant;
+  variant.shader = shader;
+  queryNativeUniformLocations(shader->program(), variant.uniforms);
+
+  const auto [it, _] =
+      g_nativeSurfaceShaders.emplace(features, std::move(variant));
+  return &it->second;
+}
+
+static SNativeShaderVariant *getNativeExtShaderVariant(CHyprOpenGLImpl *self) {
+  if (!self || !self->m_shaders || self->m_shaders->TEXVERTSRC.empty())
+    return nullptr;
+
+  if (g_nativeExtShader.shader)
+    return &g_nativeExtShader;
+  if (g_nativeExtShaderCompileAttempted)
+    return nullptr;
+
+  g_nativeExtShaderCompileAttempted = true;
+
+  auto shader = makeShared<CShader>();
+  const auto fragment =
+      preprocessShaderSource(NATIVE_EXT_FRAG_SRC, self->m_includes);
+
+  if (!shader->createProgram(self->m_shaders->TEXVERTSRC, fragment, true, true)) {
+    Log::logger->log(
+        Log::WARN,
+        "[Hyprchroma] Native external-texture shader compilation failed, "
+        "falling back to post-window tint for DMA-BUF surfaces");
+    return nullptr;
+  }
+
+  g_nativeExtShader.shader = shader;
+  queryNativeUniformLocations(shader->program(), g_nativeExtShader.uniforms);
+  return &g_nativeExtShader;
+}
+
+static const SNativeShaderVariant *
+findNativeShaderVariant(const WP<CShader> &shader) {
+  if (!shader)
+    return nullptr;
+
+  for (const auto &[_, variant] : g_nativeSurfaceShaders) {
+    if (variant.shader && shader == variant.shader)
+      return &variant;
+  }
+
+  if (g_nativeExtShader.shader && shader == g_nativeExtShader.shader)
+    return &g_nativeExtShader;
+
+  return nullptr;
+}
+
+using PGetSurfaceShaderFn = WP<CShader> (*)(CHyprOpenGLImpl *, uint8_t);
+using PUseShaderFn = WP<CShader> (*)(CHyprOpenGLImpl *, WP<CShader>);
+
+static WP<CShader> hkGetSurfaceShader(CHyprOpenGLImpl *self, uint8_t features) {
+  const auto original =
+      reinterpret_cast<PGetSurfaceShaderFn>(g_getSurfaceShaderHook->m_original);
+
+  const auto window = currentWindowForNativePath(self);
+  if (!shouldUseNativeSurfaceShader(self, window))
+    return original(self, features);
+
+  if (auto *variant = getNativeSurfaceShaderVariant(self, features))
+    return variant->shader;
+
+  return original(self, features);
+}
+
+static WP<CShader> hkUseShader(CHyprOpenGLImpl *self, WP<CShader> shader) {
+  const auto original =
+      reinterpret_cast<PUseShaderFn>(g_useShaderHook->m_original);
+
+  const auto window = currentWindowForNativePath(self);
+  const bool allowNative = shouldUseNativeSurfaceShader(self, window);
+
+  if (allowNative && self && self->m_shaders &&
+      self->m_shaders->frag[SH_FRAG_EXT] &&
+      shader == self->m_shaders->frag[SH_FRAG_EXT]) {
+    if (auto *variant = getNativeExtShaderVariant(self))
+      shader = variant->shader;
+  }
+
+  auto usedShader = original(self, shader);
+
+  if (const auto *variant = findNativeShaderVariant(usedShader)) {
+    passNativeUniforms(variant->uniforms);
+    if (window)
+      g_nativeShadedThisFrame.insert((void *)window.get());
+    if (!g_loggedNativeShaderPath) {
+      Log::logger->log(
+          Log::INFO,
+          "[Hyprchroma] Native surface shader path active "
+          "(adaptive tint composed inside Hyprland surface shaders)");
+      g_loggedNativeShaderPath = true;
+    }
+  }
+
+  return usedShader;
+}
 
 static GLuint compileShaderRaw(GLenum type, const char *source) {
   GLuint shader = glCreateShader(type);
@@ -418,6 +1027,19 @@ static void queryUniformLocations(
   debugVisualize = glGetUniformLocation(prog, "debugVisualize");
 }
 
+static void queryBlitUniformLocations(
+    GLuint prog, GLint &targetSize, GLint &quadTopLeft, GLint &quadSize,
+    GLint &windowTex, GLint &uvTopLeft, GLint &uvBottomRight,
+    GLint &opacity) {
+  targetSize = glGetUniformLocation(prog, "targetSize");
+  quadTopLeft = glGetUniformLocation(prog, "quadTopLeft");
+  quadSize = glGetUniformLocation(prog, "quadSize");
+  windowTex = glGetUniformLocation(prog, "windowTex");
+  uvTopLeft = glGetUniformLocation(prog, "uvTopLeft");
+  uvBottomRight = glGetUniformLocation(prog, "uvBottomRight");
+  opacity = glGetUniformLocation(prog, "opacity");
+}
+
 static bool compileChromaShaders() {
   GLuint vert = compileShaderRaw(GL_VERTEX_SHADER, CHROMA_VERT_SRC);
   if (!vert)
@@ -467,6 +1089,36 @@ static bool compileChromaShaders() {
 
   glDeleteShader(vert);
 
+  GLuint blitVert = compileShaderRaw(GL_VERTEX_SHADER, BLIT_VERT_SRC);
+  if (blitVert) {
+    GLuint blitFrag = compileShaderRaw(GL_FRAGMENT_SHADER, BLIT_FRAG_SRC);
+    if (blitFrag) {
+      g_blitProgram = linkProgramRaw(blitVert, blitFrag);
+      glDeleteShader(blitFrag);
+      if (g_blitProgram) {
+        queryBlitUniformLocations(
+            g_blitProgram, g_loc_blit_targetSize, g_loc_blit_quadTopLeft,
+            g_loc_blit_quadSize, g_loc_blit_windowTex, g_loc_blit_uvTopLeft,
+            g_loc_blit_uvBottomRight, g_loc_blit_opacity);
+      }
+    }
+
+    GLuint blitFragExt = compileShaderRaw(GL_FRAGMENT_SHADER, BLIT_FRAG_EXT_SRC);
+    if (blitFragExt) {
+      g_blitProgram_ext = linkProgramRaw(blitVert, blitFragExt);
+      glDeleteShader(blitFragExt);
+      if (g_blitProgram_ext) {
+        queryBlitUniformLocations(
+            g_blitProgram_ext, g_loc_blit_ext_targetSize,
+            g_loc_blit_ext_quadTopLeft, g_loc_blit_ext_quadSize,
+            g_loc_blit_ext_windowTex, g_loc_blit_ext_uvTopLeft,
+            g_loc_blit_ext_uvBottomRight, g_loc_blit_ext_opacity);
+      }
+    }
+
+    glDeleteShader(blitVert);
+  }
+
   // Create shared VAO/VBO
   glGenVertexArrays(1, &g_chromaVAO);
   glGenBuffers(1, &g_chromaVBO);
@@ -487,6 +1139,18 @@ static bool compileChromaShaders() {
 
   glBindVertexArray(0);
   glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+  if (!g_blitProgram) {
+    Log::logger->log(
+        Log::WARN,
+        "[Hyprchroma] Unified window pass blit shader unavailable, "
+        "falling back to grouped per-surface shading");
+  } else if (!g_blitProgram_ext) {
+    Log::logger->log(
+        Log::WARN,
+        "[Hyprchroma] Unified window pass has no external-texture blit shader, "
+        "DMA-BUF surfaces will fall back to grouped per-surface shading");
+  }
 
   return g_chromaProgram != 0;
 }
@@ -522,6 +1186,7 @@ public:
     float saturationThreshold = 0.20f;
     float saturationKnee = 0.16f;
     int debugVisualize = 0;
+    bool unifiedWindowPass = false;
     std::vector<SSurfaceData> surfaces;
   };
 
@@ -536,17 +1201,307 @@ public:
 
 private:
   SChromaData m_data;
+  CFramebuffer m_unifiedFB;
 };
 
+static bool composeUnifiedSurface(
+    const CChromaPassElement::SChromaData &data, CFramebuffer &fb,
+    CChromaPassElement::SSurfaceData &outSurface) {
+  if (data.surfaces.empty() || data.box.w <= 0 || data.box.h <= 0 ||
+      g_blitProgram == 0)
+    return false;
+
+  if (!fb.isAllocated() || (int)fb.m_size.x != data.box.w ||
+      (int)fb.m_size.y != data.box.h) {
+    fb.release();
+    if (!fb.alloc(data.box.w, data.box.h)) {
+      Log::logger->log(
+          Log::ERR,
+          "[Hyprchroma] Failed to allocate unified window framebuffer {}x{}",
+          data.box.w, data.box.h);
+      return false;
+    }
+  }
+
+  GLint prevProgram = 0;
+  glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
+  GLint prevActiveTexture = 0;
+  glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActiveTexture);
+  GLint prevTex2D = 0;
+  GLint prevTexExternal = 0;
+  glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex2D);
+  glGetIntegerv(GL_TEXTURE_BINDING_EXTERNAL_OES, &prevTexExternal);
+  GLint prevVAO = 0;
+  glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVAO);
+  GLint prevFB = 0;
+  glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFB);
+  GLint prevViewport[4] = {0, 0, 0, 0};
+  glGetIntegerv(GL_VIEWPORT, prevViewport);
+  GLboolean prevBlendEnabled = glIsEnabled(GL_BLEND);
+  GLint prevBlendSrcRGB = 0;
+  GLint prevBlendDstRGB = 0;
+  GLint prevBlendSrcAlpha = 0;
+  GLint prevBlendDstAlpha = 0;
+  GLint prevBlendEqRGB = 0;
+  GLint prevBlendEqAlpha = 0;
+  glGetIntegerv(GL_BLEND_SRC_RGB, &prevBlendSrcRGB);
+  glGetIntegerv(GL_BLEND_DST_RGB, &prevBlendDstRGB);
+  glGetIntegerv(GL_BLEND_SRC_ALPHA, &prevBlendSrcAlpha);
+  glGetIntegerv(GL_BLEND_DST_ALPHA, &prevBlendDstAlpha);
+  glGetIntegerv(GL_BLEND_EQUATION_RGB, &prevBlendEqRGB);
+  glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &prevBlendEqAlpha);
+  GLboolean prevScissorEnabled = glIsEnabled(GL_SCISSOR_TEST);
+  GLint prevScissorBox[4] = {0, 0, 0, 0};
+  glGetIntegerv(GL_SCISSOR_BOX, prevScissorBox);
+  GLboolean prevStencilEnabled = glIsEnabled(GL_STENCIL_TEST);
+  GLint prevStencilFunc = 0;
+  GLint prevStencilRef = 0;
+  GLint prevStencilValueMask = 0;
+  GLint prevStencilWriteMask = 0;
+  GLint prevStencilFail = 0;
+  GLint prevStencilPassDepthFail = 0;
+  GLint prevStencilPassDepthPass = 0;
+  GLint prevStencilClearValue = 0;
+  glGetIntegerv(GL_STENCIL_FUNC, &prevStencilFunc);
+  glGetIntegerv(GL_STENCIL_REF, &prevStencilRef);
+  glGetIntegerv(GL_STENCIL_VALUE_MASK, &prevStencilValueMask);
+  glGetIntegerv(GL_STENCIL_WRITEMASK, &prevStencilWriteMask);
+  glGetIntegerv(GL_STENCIL_FAIL, &prevStencilFail);
+  glGetIntegerv(GL_STENCIL_PASS_DEPTH_FAIL, &prevStencilPassDepthFail);
+  glGetIntegerv(GL_STENCIL_PASS_DEPTH_PASS, &prevStencilPassDepthPass);
+  glGetIntegerv(GL_STENCIL_CLEAR_VALUE, &prevStencilClearValue);
+  GLfloat prevClearColor[4] = {0.F, 0.F, 0.F, 0.F};
+  glGetFloatv(GL_COLOR_CLEAR_VALUE, prevClearColor);
+
+  fb.bind();
+  glViewport(0, 0, data.box.w, data.box.h);
+  glDisable(GL_SCISSOR_TEST);
+  glDisable(GL_STENCIL_TEST);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+  glBlendEquation(GL_FUNC_ADD);
+  glClearColor(0.F, 0.F, 0.F, 0.F);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glBindVertexArray(g_chromaVAO);
+
+  bool success = true;
+  for (const auto &surf : data.surfaces) {
+    const bool isExternal =
+        (surf.windowTex->m_target == GL_TEXTURE_EXTERNAL_OES);
+    const GLuint prog = isExternal ? g_blitProgram_ext : g_blitProgram;
+    if (prog == 0) {
+      if (isExternal && !g_loggedUnifiedFallbackNoExternalProgram) {
+        Log::logger->log(
+            Log::WARN,
+            "[Hyprchroma] Unified window pass encountered an external texture "
+            "without external blit shader support, falling back");
+        g_loggedUnifiedFallbackNoExternalProgram = true;
+      }
+      success = false;
+      break;
+    }
+
+    const GLint locTargetSize =
+        isExternal ? g_loc_blit_ext_targetSize : g_loc_blit_targetSize;
+    const GLint locQuadTopLeft =
+        isExternal ? g_loc_blit_ext_quadTopLeft : g_loc_blit_quadTopLeft;
+    const GLint locQuadSize =
+        isExternal ? g_loc_blit_ext_quadSize : g_loc_blit_quadSize;
+    const GLint locWindowTex =
+        isExternal ? g_loc_blit_ext_windowTex : g_loc_blit_windowTex;
+    const GLint locUvTopLeft =
+        isExternal ? g_loc_blit_ext_uvTopLeft : g_loc_blit_uvTopLeft;
+    const GLint locUvBottomRight =
+        isExternal ? g_loc_blit_ext_uvBottomRight : g_loc_blit_uvBottomRight;
+    const GLint locOpacity =
+        isExternal ? g_loc_blit_ext_opacity : g_loc_blit_opacity;
+
+    glUseProgram(prog);
+    glUniform2f(locTargetSize, (float)data.box.w, (float)data.box.h);
+    glUniform2f(locQuadTopLeft, (float)(surf.box.x - data.box.x),
+                (float)(surf.box.y - data.box.y));
+    glUniform2f(locQuadSize, (float)surf.box.w, (float)surf.box.h);
+    glUniform2f(locUvTopLeft, surf.uvTopLeft.x, surf.uvTopLeft.y);
+    glUniform2f(locUvBottomRight, surf.uvBottomRight.x, surf.uvBottomRight.y);
+    glUniform1f(locOpacity, surf.alpha);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(surf.windowTex->m_target, surf.windowTex->m_texID);
+    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_WRAP_S,
+                    GL_CLAMP_TO_EDGE);
+    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_WRAP_T,
+                    GL_CLAMP_TO_EDGE);
+    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_MIN_FILTER,
+                    data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
+    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_MAG_FILTER,
+                    data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
+    glUniform1i(locWindowTex, 0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  }
+
+  glBindVertexArray(prevVAO);
+  glActiveTexture(prevActiveTexture);
+  glBindTexture(GL_TEXTURE_2D, prevTex2D);
+  glBindTexture(GL_TEXTURE_EXTERNAL_OES, prevTexExternal);
+  glUseProgram(prevProgram);
+  glBindFramebuffer(GL_FRAMEBUFFER, prevFB);
+  glViewport(prevViewport[0], prevViewport[1], prevViewport[2],
+             prevViewport[3]);
+  if (prevBlendEnabled)
+    glEnable(GL_BLEND);
+  else
+    glDisable(GL_BLEND);
+  glBlendFuncSeparate(prevBlendSrcRGB, prevBlendDstRGB, prevBlendSrcAlpha,
+                      prevBlendDstAlpha);
+  glBlendEquationSeparate(prevBlendEqRGB, prevBlendEqAlpha);
+  if (prevScissorEnabled)
+    glEnable(GL_SCISSOR_TEST);
+  else
+    glDisable(GL_SCISSOR_TEST);
+  glScissor(prevScissorBox[0], prevScissorBox[1], prevScissorBox[2],
+            prevScissorBox[3]);
+  if (prevStencilEnabled)
+    glEnable(GL_STENCIL_TEST);
+  else
+    glDisable(GL_STENCIL_TEST);
+  glStencilFunc(prevStencilFunc, prevStencilRef, prevStencilValueMask);
+  glStencilOp(prevStencilFail, prevStencilPassDepthFail,
+              prevStencilPassDepthPass);
+  glStencilMask(prevStencilWriteMask);
+  glClearStencil(prevStencilClearValue);
+  glClearColor(prevClearColor[0], prevClearColor[1], prevClearColor[2],
+               prevClearColor[3]);
+
+  if (!success)
+    return false;
+
+  outSurface.windowTex = fb.getTexture();
+  if (!outSurface.windowTex || outSurface.windowTex->m_texID == 0)
+    return false;
+
+  outSurface.box = data.box;
+  // FBO color attachments are sampled upside-down relative to the direct
+  // surface path, so flip Y here or the preserve-mask appears mirrored and
+  // drifts opposite to scroll.
+  outSurface.uvTopLeft = Vector2D(0.F, 1.F);
+  outSurface.uvBottomRight = Vector2D(1.F, 0.F);
+  outSurface.alpha = 1.0f;
+  outSurface.isRootSurface = true;
+  return true;
+}
+
 void CChromaPassElement::draw(const CRegion &damage) {
-  if (m_data.surfaces.empty())
-    return;
-
-  static constexpr double DAMAGE_PAD = 1.0;
-
   auto pMonitor = g_pHyprOpenGL->m_renderData.pMonitor.lock();
   if (!pMonitor)
     return;
+
+  GLint composePrevProgram = 0;
+  glGetIntegerv(GL_CURRENT_PROGRAM, &composePrevProgram);
+  GLint composePrevActiveTexture = 0;
+  glGetIntegerv(GL_ACTIVE_TEXTURE, &composePrevActiveTexture);
+  GLint composePrevTex2D = 0;
+  GLint composePrevTexExternal = 0;
+  glGetIntegerv(GL_TEXTURE_BINDING_2D, &composePrevTex2D);
+  glGetIntegerv(GL_TEXTURE_BINDING_EXTERNAL_OES, &composePrevTexExternal);
+  GLint composePrevVAO = 0;
+  glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &composePrevVAO);
+  GLint composePrevFB = 0;
+  glGetIntegerv(GL_FRAMEBUFFER_BINDING, &composePrevFB);
+  GLint composePrevViewport[4] = {0, 0, 0, 0};
+  glGetIntegerv(GL_VIEWPORT, composePrevViewport);
+  GLboolean composePrevBlendEnabled = glIsEnabled(GL_BLEND);
+  GLint composePrevBlendSrcRGB = 0;
+  GLint composePrevBlendDstRGB = 0;
+  GLint composePrevBlendSrcAlpha = 0;
+  GLint composePrevBlendDstAlpha = 0;
+  GLint composePrevBlendEqRGB = 0;
+  GLint composePrevBlendEqAlpha = 0;
+  glGetIntegerv(GL_BLEND_SRC_RGB, &composePrevBlendSrcRGB);
+  glGetIntegerv(GL_BLEND_DST_RGB, &composePrevBlendDstRGB);
+  glGetIntegerv(GL_BLEND_SRC_ALPHA, &composePrevBlendSrcAlpha);
+  glGetIntegerv(GL_BLEND_DST_ALPHA, &composePrevBlendDstAlpha);
+  glGetIntegerv(GL_BLEND_EQUATION_RGB, &composePrevBlendEqRGB);
+  glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &composePrevBlendEqAlpha);
+  GLboolean composePrevScissorEnabled = glIsEnabled(GL_SCISSOR_TEST);
+  GLint composePrevScissorBox[4] = {0, 0, 0, 0};
+  glGetIntegerv(GL_SCISSOR_BOX, composePrevScissorBox);
+  GLboolean composePrevStencilEnabled = glIsEnabled(GL_STENCIL_TEST);
+  GLint composePrevStencilFunc = 0;
+  GLint composePrevStencilRef = 0;
+  GLint composePrevStencilValueMask = 0;
+  GLint composePrevStencilWriteMask = 0;
+  GLint composePrevStencilFail = 0;
+  GLint composePrevStencilPassDepthFail = 0;
+  GLint composePrevStencilPassDepthPass = 0;
+  GLint composePrevStencilClearValue = 0;
+  glGetIntegerv(GL_STENCIL_FUNC, &composePrevStencilFunc);
+  glGetIntegerv(GL_STENCIL_REF, &composePrevStencilRef);
+  glGetIntegerv(GL_STENCIL_VALUE_MASK, &composePrevStencilValueMask);
+  glGetIntegerv(GL_STENCIL_WRITEMASK, &composePrevStencilWriteMask);
+  glGetIntegerv(GL_STENCIL_FAIL, &composePrevStencilFail);
+  glGetIntegerv(GL_STENCIL_PASS_DEPTH_FAIL,
+                &composePrevStencilPassDepthFail);
+  glGetIntegerv(GL_STENCIL_PASS_DEPTH_PASS,
+                &composePrevStencilPassDepthPass);
+  glGetIntegerv(GL_STENCIL_CLEAR_VALUE, &composePrevStencilClearValue);
+  GLfloat composePrevClearColor[4] = {0.F, 0.F, 0.F, 0.F};
+  glGetFloatv(GL_COLOR_CLEAR_VALUE, composePrevClearColor);
+
+  std::vector<SSurfaceData> unifiedSurfaceStorage;
+  const auto *surfacesToDraw = &m_data.surfaces;
+
+  if (m_data.unifiedWindowPass) {
+    SSurfaceData unifiedSurface;
+    if (composeUnifiedSurface(m_data, m_unifiedFB, unifiedSurface)) {
+      unifiedSurfaceStorage.push_back(std::move(unifiedSurface));
+      surfacesToDraw = &unifiedSurfaceStorage;
+    }
+  }
+
+  glBindVertexArray(composePrevVAO);
+  glActiveTexture(composePrevActiveTexture);
+  glBindTexture(GL_TEXTURE_2D, composePrevTex2D);
+  glBindTexture(GL_TEXTURE_EXTERNAL_OES, composePrevTexExternal);
+  glUseProgram(composePrevProgram);
+  glBindFramebuffer(GL_FRAMEBUFFER, composePrevFB);
+  glViewport(composePrevViewport[0], composePrevViewport[1],
+             composePrevViewport[2], composePrevViewport[3]);
+  if (composePrevBlendEnabled)
+    glEnable(GL_BLEND);
+  else
+    glDisable(GL_BLEND);
+  glBlendFuncSeparate(composePrevBlendSrcRGB, composePrevBlendDstRGB,
+                      composePrevBlendSrcAlpha, composePrevBlendDstAlpha);
+  glBlendEquationSeparate(composePrevBlendEqRGB, composePrevBlendEqAlpha);
+  if (composePrevScissorEnabled)
+    glEnable(GL_SCISSOR_TEST);
+  else
+    glDisable(GL_SCISSOR_TEST);
+  glScissor(composePrevScissorBox[0], composePrevScissorBox[1],
+            composePrevScissorBox[2], composePrevScissorBox[3]);
+  if (composePrevStencilEnabled)
+    glEnable(GL_STENCIL_TEST);
+  else
+    glDisable(GL_STENCIL_TEST);
+  glStencilFunc(composePrevStencilFunc, composePrevStencilRef,
+                composePrevStencilValueMask);
+  glStencilOp(composePrevStencilFail, composePrevStencilPassDepthFail,
+              composePrevStencilPassDepthPass);
+  glStencilMask(composePrevStencilWriteMask);
+  glClearStencil(composePrevStencilClearValue);
+  glClearColor(composePrevClearColor[0], composePrevClearColor[1],
+               composePrevClearColor[2], composePrevClearColor[3]);
+
+  if (surfacesToDraw->empty())
+    return;
+
+  static constexpr double DAMAGE_PAD = 1.0;
+  const bool useFullWindowDamage =
+      m_data.unifiedWindowPass && surfacesToDraw != &m_data.surfaces;
+  const CRegion effectiveDamage =
+      useFullWindowDamage
+          ? CRegion(m_data.box.copy().round().expand(DAMAGE_PAD))
+          : damage.copy().expand(DAMAGE_PAD);
   // Save GL state
   GLint prevProgram = 0;
   glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
@@ -575,14 +1530,30 @@ void CChromaPassElement::draw(const CRegion &damage) {
   glGetIntegerv(GL_STENCIL_PASS_DEPTH_FAIL, &prevStencilPassDepthFail);
   glGetIntegerv(GL_STENCIL_PASS_DEPTH_PASS, &prevStencilPassDepthPass);
   glGetIntegerv(GL_STENCIL_CLEAR_VALUE, &prevStencilClearValue);
+  GLboolean prevBlendEnabled = glIsEnabled(GL_BLEND);
+  GLint prevBlendSrcRGB = 0;
+  GLint prevBlendDstRGB = 0;
+  GLint prevBlendSrcAlpha = 0;
+  GLint prevBlendDstAlpha = 0;
+  GLint prevBlendEqRGB = 0;
+  GLint prevBlendEqAlpha = 0;
+  glGetIntegerv(GL_BLEND_SRC_RGB, &prevBlendSrcRGB);
+  glGetIntegerv(GL_BLEND_DST_RGB, &prevBlendDstRGB);
+  glGetIntegerv(GL_BLEND_SRC_ALPHA, &prevBlendSrcAlpha);
+  glGetIntegerv(GL_BLEND_DST_ALPHA, &prevBlendDstAlpha);
+  glGetIntegerv(GL_BLEND_EQUATION_RGB, &prevBlendEqRGB);
+  glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &prevBlendEqAlpha);
 
   glBindVertexArray(g_chromaVAO);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+  glBlendEquation(GL_FUNC_ADD);
   glEnable(GL_STENCIL_TEST);
   glStencilMask(0x80);
   glStencilFunc(GL_NOTEQUAL, 0x80, 0x80);
   glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
 
-  CRegion clearRegion = damage.copy().expand(DAMAGE_PAD);
+  CRegion clearRegion = effectiveDamage.copy();
   clearRegion.intersect(m_data.box.copy().round().expand(DAMAGE_PAD));
   if (m_data.clipBox.w != 0 && m_data.clipBox.h != 0)
     clearRegion.intersect(m_data.clipBox.copy().round().expand(DAMAGE_PAD));
@@ -596,7 +1567,7 @@ void CChromaPassElement::draw(const CRegion &damage) {
     glClear(GL_STENCIL_BUFFER_BIT);
   }
 
-  for (const auto &surf : m_data.surfaces) {
+  for (const auto &surf : *surfacesToDraw) {
     const bool isExternal =
         (surf.windowTex->m_target == GL_TEXTURE_EXTERNAL_OES);
     const GLuint prog = isExternal ? g_chromaProgram_ext : g_chromaProgram;
@@ -681,7 +1652,7 @@ void CChromaPassElement::draw(const CRegion &damage) {
                     m_data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
     glUniform1i(locWindowTex, 0);
 
-    CRegion surfDamage = damage.copy().expand(DAMAGE_PAD);
+    CRegion surfDamage = effectiveDamage.copy();
     surfDamage.intersect(surf.box.copy().round().expand(DAMAGE_PAD));
     if (m_data.clipBox.w != 0 && m_data.clipBox.h != 0)
       surfDamage.intersect(m_data.clipBox.copy().round().expand(DAMAGE_PAD));
@@ -707,6 +1678,13 @@ void CChromaPassElement::draw(const CRegion &damage) {
   glBindTexture(GL_TEXTURE_2D, prevTex2D);
   glBindTexture(GL_TEXTURE_EXTERNAL_OES, prevTexExternal);
   glUseProgram(prevProgram);
+  if (prevBlendEnabled)
+    glEnable(GL_BLEND);
+  else
+    glDisable(GL_BLEND);
+  glBlendFuncSeparate(prevBlendSrcRGB, prevBlendDstRGB, prevBlendSrcAlpha,
+                      prevBlendDstAlpha);
+  glBlendEquationSeparate(prevBlendEqRGB, prevBlendEqAlpha);
   if (prevStencilEnabled)
     glEnable(GL_STENCIL_TEST);
   else
@@ -755,9 +1733,46 @@ static void updateConfig() {
       getCfgInt("plugin:darkwindow:enable_on_fullscreen", 1);
   g_config.tint_all_surfaces =
       getCfgInt("plugin:darkwindow:tint_all_surfaces", 1);
+  g_config.unified_window_pass =
+      getCfgInt("plugin:darkwindow:unified_window_pass", 0);
+  g_config.native_surface_shader_pass =
+      getCfgInt("plugin:darkwindow:native_surface_shader_pass", 0);
+  g_config.cursor_invalidation_mode =
+      std::max(0, getCfgInt("plugin:darkwindow:cursor_invalidation_mode", 0));
+  g_config.cursor_invalidation_throttle_ms =
+      std::max(0, getCfgInt("plugin:darkwindow:cursor_invalidation_throttle_ms",
+                            0));
+  g_config.cursor_invalidation_radius =
+      std::max(0, getCfgInt("plugin:darkwindow:cursor_invalidation_radius",
+                            48));
   g_config.suspend_on_workspace_switch_ms =
       std::max(0, getCfgInt("plugin:darkwindow:suspend_on_workspace_switch_ms",
                             150));
+
+  if (g_config.cursor_invalidation_mode > 0 && !g_loggedCursorInvalidationMode) {
+    Log::logger->log(
+        Log::INFO,
+        "[Hyprchroma] Cursor invalidation mode {} active "
+        "(throttle={}ms radius={}px)",
+        g_config.cursor_invalidation_mode,
+        g_config.cursor_invalidation_throttle_ms,
+        g_config.cursor_invalidation_radius);
+    g_loggedCursorInvalidationMode = true;
+  } else if (g_config.cursor_invalidation_mode <= 0) {
+    g_loggedCursorInvalidationMode = false;
+  }
+
+  if (g_config.native_surface_shader_pass && !g_runtimeProbeSafeForLowerLevel &&
+      !g_loggedNativeFlagBlocked) {
+    Log::logger->log(
+        Log::WARN,
+        "[Hyprchroma] native_surface_shader_pass requested but runtime probe "
+        "does not consider lower-level hooks safe on this Hyprland build");
+    g_loggedNativeFlagBlocked = true;
+  } else if (!g_config.native_surface_shader_pass ||
+             g_runtimeProbeSafeForLowerLevel) {
+    g_loggedNativeFlagBlocked = false;
+  }
 }
 
 static bool isShaded(PHLWINDOW pWindow) {
@@ -768,11 +1783,65 @@ static bool isShaded(PHLWINDOW pWindow) {
   return g_globalShaded;
 }
 
+static bool pointInExpandedBox(const Vector2D &point, const CBox &box,
+                               const double expand) {
+  return point.x >= box.x - expand && point.x <= box.x + box.w + expand &&
+         point.y >= box.y - expand && point.y <= box.y + box.h + expand;
+}
+
+static void invalidateFromCursorMotion(const Vector2D &, Event::SCallbackInfo &) {
+  if (g_config.cursor_invalidation_mode <= 0 || !g_pInputManager)
+    return;
+
+  const auto now = std::chrono::steady_clock::now();
+  if (g_config.cursor_invalidation_throttle_ms > 0 &&
+      g_lastCursorInvalidation != std::chrono::steady_clock::time_point::min() &&
+      now - g_lastCursorInvalidation <
+          std::chrono::milliseconds(g_config.cursor_invalidation_throttle_ms))
+    return;
+
+  if (g_config.cursor_invalidation_mode == 3) {
+    redrawAll();
+    g_lastCursorInvalidation = now;
+    return;
+  }
+
+  const auto cursor = g_pInputManager->getMouseCoordsInternal();
+  const auto radius = static_cast<double>(g_config.cursor_invalidation_radius);
+  bool invalidatedAnything = false;
+
+  for (auto &window : g_pCompositor->m_windows) {
+    if (!window || !isShaded(window) || window->isHidden())
+      continue;
+
+    auto workspace = window->m_workspace;
+    if (!workspace || !workspace->m_visible)
+      continue;
+
+    const auto box = window->getWindowMainSurfaceBox();
+    const bool shouldInvalidate =
+        g_config.cursor_invalidation_mode == 2 ||
+        pointInExpandedBox(cursor, box, radius);
+
+    if (!shouldInvalidate)
+      continue;
+
+    g_pHyprRenderer->damageWindow(window);
+    if (auto monitor = window->m_monitor.lock())
+      g_pCompositor->scheduleFrameForMonitor(monitor);
+    invalidatedAnything = true;
+  }
+
+  if (invalidatedAnything)
+    g_lastCursorInvalidation = now;
+}
+
 // ── Render hook ──
 
 static void onRenderStage(eRenderStage stage) {
   if (stage == RENDER_BEGIN) {
     g_renderedThisFrame.clear();
+    g_nativeShadedThisFrame.clear();
 
     const bool suspendedNow =
         std::chrono::steady_clock::now() < g_suspendUntil;
@@ -805,6 +1874,9 @@ static void onRenderStage(eRenderStage stage) {
 
   auto window = g_pHyprOpenGL->m_renderData.currentWindow.lock();
   if (!window || !isShaded(window))
+    return;
+
+  if (g_nativeShadedThisFrame.contains((void *)window.get()))
     return;
 
   if (!g_config.enable_on_fullscreen && window->isFullscreen())
@@ -860,6 +1932,7 @@ static void onRenderStage(eRenderStage stage) {
   chromaData.saturationThreshold = g_config.saturation_threshold;
   chromaData.saturationKnee = g_config.saturation_knee;
   chromaData.debugVisualize = g_config.debug_visualize;
+  chromaData.unifiedWindowPass = g_config.unified_window_pass;
   if (g_shadersCompiled) {
     auto rootSurface = window->resource();
     if (!rootSurface) {
@@ -958,7 +2031,8 @@ static void onRenderStage(eRenderStage stage) {
                          "[Hyprchroma] No usable surface textures collected "
                          "for window, using uniform fallback");
         g_loggedFallbackNoTexture = true;
-      } else if (chromaData.surfaces.size() > 1) {
+      } else if (chromaData.surfaces.size() > 1 &&
+                 !g_config.unified_window_pass) {
         // Hyprland queues surfaces in breadthfirst compositor order and later
         // surfaces visually appear on top. Our stencil path is "first claim
         // wins", so we must tint in reverse render order to let the topmost
@@ -989,6 +2063,13 @@ static void onRenderStage(eRenderStage stage) {
                        "(surfaces={}, clip={}x{})",
                        chromaData.surfaces.size(), clipBox.w, clipBox.h);
       g_loggedShaderPath = true;
+    }
+    if (g_config.unified_window_pass && !g_loggedUnifiedPath) {
+      Log::logger->log(
+          Log::INFO,
+          "[Hyprchroma] Unified window pass enabled "
+          "(compose full window into FBO before adaptive tint)");
+      g_loggedUnifiedPath = true;
     }
     g_pHyprRenderer->m_renderPass.add(
         makeUnique<CChromaPassElement>(chromaData));
@@ -1060,6 +2141,279 @@ static void redrawAll() {
     g_pHyprRenderer->damageMonitor(m);
     g_pCompositor->scheduleFrameForMonitor(m);
   }
+}
+
+static std::vector<SFunctionMatch>
+findFunctionMatches(const std::string &query,
+                    const std::string &demangledFilter = "") {
+  auto matches = HyprlandAPI::findFunctionsByName(pHandle, query);
+
+  if (demangledFilter.empty())
+    return matches;
+
+  std::erase_if(matches, [&](const SFunctionMatch &match) {
+    return match.demangled.find(demangledFilter) == std::string::npos;
+  });
+
+  return matches;
+}
+
+static SRuntimeSymbolProbe
+probeFunctionSymbol(const std::string &query,
+                    const std::string &demangledFilter = "") {
+  return {query, demangledFilter, findFunctionMatches(query, demangledFilter)};
+}
+
+static std::string boolWord(const bool value) {
+  return value ? "yes" : "no";
+}
+
+static std::string jsonEscape(const std::string &value) {
+  std::string escaped;
+  escaped.reserve(value.size() + 16);
+
+  for (const char c : value) {
+    switch (c) {
+    case '\\':
+      escaped += "\\\\";
+      break;
+    case '"':
+      escaped += "\\\"";
+      break;
+    case '\n':
+      escaped += "\\n";
+      break;
+    case '\r':
+      escaped += "\\r";
+      break;
+    case '\t':
+      escaped += "\\t";
+      break;
+    default:
+      escaped += c;
+      break;
+    }
+  }
+
+  return escaped;
+}
+
+static std::string
+formatSymbolProbeSummary(const SRuntimeSymbolProbe &probe,
+                         const std::size_t maxMatches = 4) {
+  std::ostringstream out;
+  out << probe.query;
+  if (!probe.demangledFilter.empty())
+    out << " [filter: " << probe.demangledFilter << "]";
+  out << " -> " << probe.matches.size() << " match(es)";
+
+  const auto shown = std::min(maxMatches, probe.matches.size());
+  for (std::size_t index = 0; index < shown; ++index)
+    out << "\n  - " << probe.matches[index].demangled;
+
+  if (probe.matches.size() > shown)
+    out << "\n  - ... +" << (probe.matches.size() - shown) << " more";
+
+  return out.str();
+}
+
+static SRuntimeProbeReport collectRuntimeProbeReport() {
+  SRuntimeProbeReport report;
+  report.runtimeVersion = HyprlandAPI::getHyprlandVersion(pHandle);
+  report.hashMatchesBuild = report.runtimeVersion.hash == GIT_COMMIT_HASH;
+  report.tagMatchesBuild = report.runtimeVersion.tag == GIT_TAG;
+
+  report.useShader =
+      probeFunctionSymbol("useShader", "CHyprOpenGLImpl::useShader");
+  report.getSurfaceShader = probeFunctionSymbol(
+      "getSurfaceShader", "CHyprOpenGLImpl::getSurfaceShader");
+  report.renderTexture =
+      probeFunctionSymbol("renderTexture", "CHyprOpenGLImpl::renderTexture");
+  report.renderTextureInternalWithDamage =
+      probeFunctionSymbol("renderTextureInternalWithDamage",
+                          "CHyprOpenGLImpl::renderTextureInternalWithDamage");
+  report.decorationGetDataFor =
+      probeFunctionSymbol("getDataFor", "CDecorationPositioner::getDataFor");
+
+  report.supportsModernShaderInsertion =
+      !report.useShader.matches.empty() &&
+      !report.getSurfaceShader.matches.empty();
+  report.supportsDecorationHook = !report.decorationGetDataFor.matches.empty();
+
+  report.safeForLowerLevelPrototype =
+      report.hashMatchesBuild && report.modernRenderAPIHeadersPresent &&
+      report.eventBusRenderStagePresent && report.preWindowStagePresent &&
+      report.postWindowStagePresent && report.currentWindowRenderDataPresent &&
+      report.supportsModernShaderInsertion;
+
+  if (!report.hashMatchesBuild) {
+    report.recommendation =
+        "keep the safe post-window path: runtime hash differs from the build "
+        "hash";
+  } else if (report.safeForLowerLevelPrototype) {
+    report.recommendation =
+        "candidate for a guarded lower-level prototype via "
+        "useShader/getSurfaceShader";
+  } else if (report.supportsDecorationHook) {
+    report.recommendation =
+        "decoration hook is present, but no modern shader insertion point is "
+        "confirmed; keep the safe post-window path";
+  } else {
+    report.recommendation =
+        "no confirmed lower-level insertion point on this runtime; keep the "
+        "safe post-window path";
+  }
+
+  g_runtimeProbeSafeForLowerLevel = report.safeForLowerLevelPrototype;
+  return report;
+}
+
+static std::string
+buildRuntimeProbeTextReport(const SRuntimeProbeReport &report) {
+  std::ostringstream out;
+  out << "Hyprchroma runtime probe\n";
+  out << "runtime.tag: " << report.runtimeVersion.tag << "\n";
+  out << "runtime.hash: " << report.runtimeVersion.hash << "\n";
+  out << "runtime.branch: " << report.runtimeVersion.branch << "\n";
+  out << "runtime.dirty: " << boolWord(report.runtimeVersion.dirty) << "\n";
+  out << "build.tag: " << GIT_TAG << "\n";
+  out << "build.hash: " << GIT_COMMIT_HASH << "\n";
+  out << "hash_match: " << boolWord(report.hashMatchesBuild) << "\n";
+  out << "tag_match: " << boolWord(report.tagMatchesBuild) << "\n";
+  out << "headers.modern_render_api: "
+      << boolWord(report.modernRenderAPIHeadersPresent) << "\n";
+  out << "headers.event_bus_render_stage: "
+      << boolWord(report.eventBusRenderStagePresent) << "\n";
+  out << "headers.render_pre_window: " << boolWord(report.preWindowStagePresent)
+      << "\n";
+  out << "headers.render_post_window: "
+      << boolWord(report.postWindowStagePresent) << "\n";
+  out << "headers.current_window_render_data: "
+      << boolWord(report.currentWindowRenderDataPresent) << "\n";
+  out << "legacy_upstream_shader_swap_abi: "
+      << boolWord(report.legacyShaderSwapABIAvailable) << "\n";
+  out << "supports_modern_shader_insertion: "
+      << boolWord(report.supportsModernShaderInsertion) << "\n";
+  out << "supports_decoration_hook: "
+      << boolWord(report.supportsDecorationHook) << "\n";
+  out << "safe_for_lower_level_prototype: "
+      << boolWord(report.safeForLowerLevelPrototype) << "\n";
+  out << "recommendation: " << report.recommendation << "\n";
+  out << "\n"
+      << formatSymbolProbeSummary(report.useShader) << "\n";
+  out << "\n"
+      << formatSymbolProbeSummary(report.getSurfaceShader) << "\n";
+  out << "\n"
+      << formatSymbolProbeSummary(report.renderTexture) << "\n";
+  out << "\n"
+      << formatSymbolProbeSummary(report.renderTextureInternalWithDamage)
+      << "\n";
+  out << "\n"
+      << formatSymbolProbeSummary(report.decorationGetDataFor);
+
+  return out.str();
+}
+
+static std::string
+buildRuntimeProbeJsonReport(const SRuntimeProbeReport &report) {
+  const auto dumpSymbolProbe = [&](const SRuntimeSymbolProbe &probe) {
+    std::ostringstream out;
+    out << "{";
+    out << "\"query\":\"" << jsonEscape(probe.query) << "\",";
+    out << "\"filter\":\"" << jsonEscape(probe.demangledFilter) << "\",";
+    out << "\"count\":" << probe.matches.size() << ",";
+    out << "\"matches\":[";
+    for (std::size_t index = 0; index < probe.matches.size(); ++index) {
+      if (index != 0)
+        out << ",";
+      out << "{";
+      out << "\"signature\":\"" << jsonEscape(probe.matches[index].signature)
+          << "\",";
+      out << "\"demangled\":\"" << jsonEscape(probe.matches[index].demangled)
+          << "\"";
+      out << "}";
+    }
+    out << "]";
+    out << "}";
+    return out.str();
+  };
+
+  std::ostringstream out;
+  out << "{";
+  out << "\"runtime\":{";
+  out << "\"tag\":\"" << jsonEscape(report.runtimeVersion.tag) << "\",";
+  out << "\"hash\":\"" << jsonEscape(report.runtimeVersion.hash) << "\",";
+  out << "\"branch\":\"" << jsonEscape(report.runtimeVersion.branch) << "\",";
+  out << "\"dirty\":" << (report.runtimeVersion.dirty ? "true" : "false");
+  out << "},";
+  out << "\"build\":{";
+  out << "\"tag\":\"" << jsonEscape(GIT_TAG) << "\",";
+  out << "\"hash\":\"" << jsonEscape(GIT_COMMIT_HASH) << "\"";
+  out << "},";
+  out << "\"capabilities\":{";
+  out << "\"hash_match\":" << (report.hashMatchesBuild ? "true" : "false")
+      << ",";
+  out << "\"tag_match\":" << (report.tagMatchesBuild ? "true" : "false")
+      << ",";
+  out << "\"modern_render_api_headers_present\":"
+      << (report.modernRenderAPIHeadersPresent ? "true" : "false") << ",";
+  out << "\"event_bus_render_stage_present\":"
+      << (report.eventBusRenderStagePresent ? "true" : "false") << ",";
+  out << "\"render_pre_window_present\":"
+      << (report.preWindowStagePresent ? "true" : "false") << ",";
+  out << "\"render_post_window_present\":"
+      << (report.postWindowStagePresent ? "true" : "false") << ",";
+  out << "\"current_window_render_data_present\":"
+      << (report.currentWindowRenderDataPresent ? "true" : "false") << ",";
+  out << "\"legacy_upstream_shader_swap_abi_available\":"
+      << (report.legacyShaderSwapABIAvailable ? "true" : "false") << ",";
+  out << "\"supports_modern_shader_insertion\":"
+      << (report.supportsModernShaderInsertion ? "true" : "false") << ",";
+  out << "\"supports_decoration_hook\":"
+      << (report.supportsDecorationHook ? "true" : "false") << ",";
+  out << "\"safe_for_lower_level_prototype\":"
+      << (report.safeForLowerLevelPrototype ? "true" : "false");
+  out << "},";
+  out << "\"symbols\":{";
+  out << "\"useShader\":" << dumpSymbolProbe(report.useShader) << ",";
+  out << "\"getSurfaceShader\":" << dumpSymbolProbe(report.getSurfaceShader)
+      << ",";
+  out << "\"renderTexture\":" << dumpSymbolProbe(report.renderTexture) << ",";
+  out << "\"renderTextureInternalWithDamage\":"
+      << dumpSymbolProbe(report.renderTextureInternalWithDamage) << ",";
+  out << "\"decorationGetDataFor\":"
+      << dumpSymbolProbe(report.decorationGetDataFor);
+  out << "},";
+  out << "\"recommendation\":\"" << jsonEscape(report.recommendation) << "\"";
+  out << "}";
+  return out.str();
+}
+
+static void logRuntimeProbeReport(const SRuntimeProbeReport &report,
+                                  const bool verbose) {
+  const auto text = buildRuntimeProbeTextReport(report);
+  std::istringstream stream(text);
+  std::string line;
+  int lineNumber = 0;
+
+  while (std::getline(stream, line)) {
+    if (!verbose && lineNumber >= 16)
+      break;
+    Log::logger->log(Log::INFO, "[Hyprchroma] {}", line);
+    ++lineNumber;
+  }
+}
+
+static void notifyRuntimeProbeResult(const SRuntimeProbeReport &report) {
+  const auto message = report.safeForLowerLevelPrototype
+                           ? "[Hyprchroma] Runtime probe: guarded lower-level "
+                             "prototype looks viable"
+                           : "[Hyprchroma] Runtime probe: keep the safe "
+                             "post-window path";
+  const auto color = report.safeForLowerLevelPrototype
+                         ? CHyprColor(0.15f, 0.9f, 0.25f, 1.0f)
+                         : CHyprColor(0.95f, 0.75f, 0.15f, 1.0f);
+  HyprlandAPI::addNotification(pHandle, message, color, 3500);
 }
 
 // ── Dispatchers ──
@@ -1162,6 +2516,20 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
                               Hyprlang::INT{1});
   HyprlandAPI::addConfigValue(handle, "plugin:darkwindow:tint_all_surfaces",
                               Hyprlang::INT{1});
+  HyprlandAPI::addConfigValue(handle, "plugin:darkwindow:unified_window_pass",
+                              Hyprlang::INT{0});
+  HyprlandAPI::addConfigValue(handle,
+                              "plugin:darkwindow:native_surface_shader_pass",
+                              Hyprlang::INT{0});
+  HyprlandAPI::addConfigValue(handle,
+                              "plugin:darkwindow:cursor_invalidation_mode",
+                              Hyprlang::INT{0});
+  HyprlandAPI::addConfigValue(
+      handle, "plugin:darkwindow:cursor_invalidation_throttle_ms",
+      Hyprlang::INT{0});
+  HyprlandAPI::addConfigValue(handle,
+                              "plugin:darkwindow:cursor_invalidation_radius",
+                              Hyprlang::INT{48});
   HyprlandAPI::addConfigValue(
       handle, "plugin:darkwindow:suspend_on_workspace_switch_ms",
       Hyprlang::INT{150});
@@ -1187,23 +2555,110 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
         redrawAll();
       });
 
-  HyprlandAPI::addDispatcherV2(handle, "togglechromakey",
-                               [](std::string args) -> SDispatchResult {
-                                 return shadeDispatcher(args);
-                               });
+  g_mouseMoveListener = Event::bus()->m_events.input.mouse.move.listen(
+      [](const Vector2D &delta, Event::SCallbackInfo &info) {
+        invalidateFromCursorMotion(delta, info);
+      });
 
-  HyprlandAPI::addDispatcherV2(handle, "darkwindow:shade",
-                               [](std::string args) -> SDispatchResult {
-                                 return shadeDispatcher(args);
-                               });
+  if (!HyprlandAPI::addDispatcherV2(handle, "togglechromakey",
+                                    [](std::string args) -> SDispatchResult {
+                                      return shadeDispatcher(args);
+                                    })) {
+    Log::logger->log(Log::WARN,
+                     "[Hyprchroma] Failed to register dispatcher "
+                     "togglechromakey");
+  }
+
+  if (!HyprlandAPI::addDispatcherV2(handle, "darkwindow:shade",
+                                    [](std::string args) -> SDispatchResult {
+                                      return shadeDispatcher(args);
+                                    })) {
+    Log::logger->log(Log::WARN,
+                     "[Hyprchroma] Failed to register dispatcher "
+                     "darkwindow:shade");
+  }
+
+  const auto initialProbe = collectRuntimeProbeReport();
+
+  if (initialProbe.safeForLowerLevelPrototype) {
+    const auto installHook = [&](const std::string &query,
+                                 const std::string &filter,
+                                 const void *destination,
+                                 CFunctionHook *&slot) {
+      auto matches = findFunctionMatches(query, filter);
+      if (matches.size() != 1) {
+        Log::logger->log(
+            Log::WARN,
+            "[Hyprchroma] Expected exactly one match for {} [{}], got {}",
+            query, filter, matches.size());
+        return false;
+      }
+
+      slot = HyprlandAPI::createFunctionHook(handle, matches.front().address,
+                                             destination);
+      if (!slot) {
+        Log::logger->log(Log::WARN,
+                         "[Hyprchroma] Failed to allocate hook for {}", filter);
+        return false;
+      }
+
+      if (!slot->hook()) {
+        Log::logger->log(Log::WARN,
+                         "[Hyprchroma] Failed to activate hook for {}", filter);
+        HyprlandAPI::removeFunctionHook(handle, slot);
+        slot = nullptr;
+        return false;
+      }
+
+      return true;
+    };
+
+    const bool hookedGetSurfaceShader = installHook(
+        "getSurfaceShader", "CHyprOpenGLImpl::getSurfaceShader",
+        reinterpret_cast<void *>(hkGetSurfaceShader), g_getSurfaceShaderHook);
+    const bool hookedUseShader = installHook(
+        "useShader", "CHyprOpenGLImpl::useShader",
+        reinterpret_cast<void *>(hkUseShader), g_useShaderHook);
+
+    if (hookedGetSurfaceShader && hookedUseShader && !g_loggedNativeHooks) {
+      Log::logger->log(
+          Log::INFO,
+          "[Hyprchroma] Installed guarded lower-level hooks "
+          "(getSurfaceShader/useShader)");
+      g_loggedNativeHooks = true;
+    }
+  }
+
+  g_runtimeProbeCommand = HyprlandAPI::registerHyprCtlCommand(
+      handle, {.name = "darkwindowprobe",
+               .exact = true,
+               .fn =
+                   [](eHyprCtlOutputFormat format, std::string) {
+                     const auto report = collectRuntimeProbeReport();
+                     return format == FORMAT_JSON
+                                ? buildRuntimeProbeJsonReport(report)
+                                : buildRuntimeProbeTextReport(report);
+                   }});
+
+  if (!g_runtimeProbeCommand)
+    Log::logger->log(
+        Log::WARN,
+        "[Hyprchroma] Failed to register hyprctl command darkwindowprobe");
+  else
+    Log::logger->log(Log::INFO,
+                    "[Hyprchroma] hyprctl command registration ok for "
+                     "darkwindowprobe");
 
   HyprlandAPI::addNotification(handle,
-                               "[DarkWindow] Registered v3.3.1 "
-                               "(Grouped adaptive chromakey tint)",
+                               "[DarkWindow] Registered v3.4.0 "
+                               "(Grouped adaptive chromakey tint + guarded "
+                               "native surface shader path)",
                                CHyprColor(0.f, 1.f, 0.f, 1.f), 3000);
 
+  logRuntimeProbeReport(initialProbe, false);
+
   return {"DarkWindow", "Grouped adaptive per-pixel chromakey tint", "tco",
-          "3.3.1"};
+          "3.4.0"};
 }
 
 APICALL EXPORT void pluginExit() {
@@ -1211,7 +2666,25 @@ APICALL EXPORT void pluginExit() {
   g_configListener.reset();
   g_destroyWindowListener.reset();
   g_workspaceListener.reset();
+  g_mouseMoveListener.reset();
+  if (g_runtimeProbeCommand) {
+    HyprlandAPI::unregisterHyprCtlCommand(pHandle, g_runtimeProbeCommand);
+    g_runtimeProbeCommand.reset();
+  }
+  if (g_useShaderHook) {
+    HyprlandAPI::removeFunctionHook(pHandle, g_useShaderHook);
+    g_useShaderHook = nullptr;
+  }
+  if (g_getSurfaceShaderHook) {
+    HyprlandAPI::removeFunctionHook(pHandle, g_getSurfaceShaderHook);
+    g_getSurfaceShaderHook = nullptr;
+  }
   g_perWindowShaded.clear();
+  g_nativeShadedThisFrame.clear();
+  g_nativeSurfaceShaders.clear();
+  g_nativeSurfaceShaderFailures.clear();
+  g_nativeExtShader = {};
+  g_nativeExtShaderCompileAttempted = false;
 
   if (g_chromaProgram) {
     glDeleteProgram(g_chromaProgram);
@@ -1220,6 +2693,14 @@ APICALL EXPORT void pluginExit() {
   if (g_chromaProgram_ext) {
     glDeleteProgram(g_chromaProgram_ext);
     g_chromaProgram_ext = 0;
+  }
+  if (g_blitProgram) {
+    glDeleteProgram(g_blitProgram);
+    g_blitProgram = 0;
+  }
+  if (g_blitProgram_ext) {
+    glDeleteProgram(g_blitProgram_ext);
+    g_blitProgram_ext = 0;
   }
   if (g_chromaVBO) {
     glDeleteBuffers(1, &g_chromaVBO);
@@ -1233,6 +2714,10 @@ APICALL EXPORT void pluginExit() {
   g_notifiedShaderDebugPath = false;
   g_notifiedFallbackDebugPath = false;
   g_notifiedSurfaceDebugCount = false;
+  g_loggedUnifiedPath = false;
+  g_loggedNativeShaderPath = false;
+  g_loggedNativeHooks = false;
+  g_loggedUnifiedFallbackNoExternalProgram = false;
 
   redrawAll();
 }

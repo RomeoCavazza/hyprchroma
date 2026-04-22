@@ -37,6 +37,14 @@ plugin:darkwindow:enable_on_fullscreen = 0
 # Tint every traced surface/subsurface (recommended)
 plugin:darkwindow:tint_all_surfaces    = 1
 
+# Compose the whole window into one intermediate framebuffer before tinting
+# Helps reduce inter-surface seams on dense hover-heavy UIs
+plugin:darkwindow:unified_window_pass  = 1
+
+# Hook Hyprland's own surface shader path for a single-pass adaptive tint
+# Strongest fix for hover seams / cursor-induced dark trails on complex UIs
+plugin:darkwindow:native_surface_shader_pass = 1
+
 # Briefly suspend tint after a workspace switch
 plugin:darkwindow:suspend_on_workspace_switch_ms = 150
 ```
