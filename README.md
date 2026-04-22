@@ -1,8 +1,8 @@
 # Hyprchroma
 
-> [!NOTE]
-> This fork keeps the upstream README below mostly unchanged for reference.
-> The current fork code targets Hyprland `0.54.2` (`59f9f2688ac508a0584d1462151195a6c4992f99`) and was validated on NixOS `26.05 (Yarara)`.
+> [!WARNING]
+> This fork is no longer a drop-in reflection of upstream: it ports Hyprchroma to the modern Hyprland `v0.54.2` render API and replaces the old path with a more advanced adaptive tint pipeline, including grouped surface handling, an optional unified window pass, and a guarded native surface shader path.
+> The README below stays close to the original upstream project for context, while the code shipped here has been validated on Hyprland `v0.54.2` under NixOS `26.05 (Yarara)`.
 
 ![2024-10-18-000536_hyprshot](https://github.com/user-attachments/assets/d47d78e7-5ddd-4637-83d4-6a8a7be2e0ce)
 
