@@ -21,7 +21,7 @@
     in rec {
       hyprchroma = pkgs.stdenv.mkDerivation {
         pname = "hyprchroma";
-        version = "3.3.1-v054";
+        version = "3.4.0-v054";
         src = nix-filter.lib {
           root = ./.;
           include = [

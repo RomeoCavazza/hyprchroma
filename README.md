@@ -1,8 +1,8 @@
 # Hyprchroma
 
 > [!WARNING]
-> This fork is no longer a drop-in reflection of upstream: it ports Hyprchroma to the modern Hyprland `v0.54.2` render API and replaces the old path with a more advanced adaptive tint pipeline, including grouped surface handling, an optional unified window pass, and a guarded native surface shader path.
-> The README below stays close to the original upstream project for context, while the code shipped here has been validated on Hyprland `v0.54.2` under NixOS `26.05 (Yarara)`.
+> This fork ports Hyprchroma to Hyprland `v0.54.2` and replaces the old implementation with a more advanced adaptive tint pipeline, including grouped surface handling, an optional unified window pass, and a guarded native surface shader path.
+> The current fork has been validated on Hyprland `v0.54.2` under NixOS `26.05 (Yarara)`.
 
 ![2024-10-18-000536_hyprshot](https://github.com/user-attachments/assets/d47d78e7-5ddd-4637-83d4-6a8a7be2e0ce)
 
@@ -19,20 +19,20 @@ Also adds 2 Dispatches `togglewindowchromakey WINDOW` and `togglechromakey` (for
 
 ## Installation
 
-### Hyprland >= v0.36.0
-We now support Nix, wooo!
+### Hyprland v0.54.2
+This fork currently targets Hyprland `v0.54.2`.
 
-### Hyprpm
-
+### Nix
+```nix
 outputs = {
   home-manager,
-  hypr-darkwindow,
+  hyprchroma,
   ...
 }: {
   ... = {
     home-manager.users.micha4w = {
       wayland.windowManager.hyprland.plugins = [
-        hypr-darkwindow.packages.${pkgs.system}.Hypr-DarkWindow
+        hyprchroma.packages.${pkgs.system}.hyprchroma
       ];
     };
   };
@@ -40,17 +40,18 @@ outputs = {
 ```
 
 > [!NOTE]
-> In this example `inputs.hypr-darkwindow.url` sets the tag, Make sure that tag matches your Hyprland version.
+> This fork's flake is pinned for Hyprland `v0.54.2`. If you retarget Hyprland, update the plugin build target as well.
 
-
-### Hyprland >= v0.34.0
+### Hyprpm
 Install using `hyprpm`
 ```sh
-hyprpm add https://github.com/alexhulbert/Hyprchroma
+hyprpm add https://github.com/RomeoCavazza/Hyprchroma
 hyprpm enable hyprchroma
 hyprpm reload
 ```
 
-### Nix
-
-For nix instructions, refer to the parent repository.
+### Manual build
+```sh
+make all
+hyprctl plugin load ./out/hyprchroma.so
+```
