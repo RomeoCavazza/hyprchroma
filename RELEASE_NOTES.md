@@ -2,7 +2,7 @@
 
 ## Scope
 
-This release unifies the recent Hyprland `v0.54.2` work into a single public version.
+This canonical release replaces the earlier public `v3.4.0-v054` drafts/ports with one validated public version for Hyprland `v0.54.2`.
 
 It includes:
 
@@ -11,6 +11,9 @@ It includes:
 - workspace-switch smoothing via `plugin:darkwindow:suspend_on_workspace_switch_ms`
 - the optional unified window composition pass
 - the guarded native surface shader path for better hover stability on dense dark UIs
+- lower-level render-path activation and hardening so native coverage now engages reliably on real `v0.54.2` clients
+- runtime probe tooling (`darkwindowprobe` / `darkwindowprobe2`) for ABI and render-path diagnostics
+- cursor invalidation controls for hover/cursor trail mitigation
 - README/install cleanup so the fork is documented more honestly
 
 ## Files to sync to `RomeoCavazza/Hyprchroma`
@@ -48,6 +51,8 @@ Do not sync NixOS-local files:
 - Adds `plugin:darkwindow:suspend_on_workspace_switch_ms`
 - Adds the optional `plugin:darkwindow:unified_window_pass`
 - Adds the guarded `plugin:darkwindow:native_surface_shader_pass`
+- Adds lower-level render-path hardening so the native tint path can activate on real-world clients such as Firefox, foot, and VS Code
+- Adds cursor invalidation controls to reduce residual dark trails during hover-heavy redraws
 - Improves hover stability and reduces dark cursor trails on dense dark interfaces
 
 ## Why this release exists
@@ -56,14 +61,17 @@ This release consolidates the fork's recent progress into one coherent public ve
 
 The original upstream plugin targets an older rendering path. This fork keeps the same project identity, but reworks the internals for the modern Hyprland render API and a more precise adaptive tint pipeline.
 
-The biggest recent step is the guarded native surface shader path, which moves the tint logic closer to Hyprland's own surface rendering. In practice, that reduces inter-surface seams, improves preservation of vivid UI elements, and greatly reduces cursor-induced dark trails on complex dark UIs.
+The biggest recent step is the guarded native surface shader path, which moves the tint logic closer to Hyprland's own surface rendering. The final hardening work also resolves real render-path coverage on Hyprland `v0.54.2` and adds runtime diagnostics so the lower-level path can be validated instead of guessed.
+
+In practice, that reduces inter-surface seams, improves preservation of vivid UI elements, and greatly reduces cursor-induced dark trails on complex dark UIs.
 
 ## Main config knobs
 
 ```conf
 plugin:darkwindow:suspend_on_workspace_switch_ms = 150
-plugin:darkwindow:unified_window_pass = 1
+plugin:darkwindow:unified_window_pass = 0
 plugin:darkwindow:native_surface_shader_pass = 1
+plugin:darkwindow:cursor_invalidation_mode = 1
 ```
 
 Set any of them to `0` to disable the corresponding behavior.

@@ -8,8 +8,10 @@
 #include <algorithm>
 #include <any>
 #include <chrono>
+#include <cmath>
 #include <format>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -47,6 +49,7 @@ static CHyprSignalListener g_destroyWindowListener;
 static CHyprSignalListener g_workspaceListener;
 static CHyprSignalListener g_mouseMoveListener;
 static SP<SHyprCtlCommand> g_runtimeProbeCommand;
+static SP<SHyprCtlCommand> g_runtimeProbeCommandV2;
 
 // Glass state
 static bool g_globalShaded = true;
@@ -55,6 +58,48 @@ static std::set<void *> g_perWindowShaded;
 // Render-local guard (reset every frame)
 static std::set<void *> g_renderedThisFrame;
 static std::set<void *> g_nativeShadedThisFrame;
+static std::set<std::string> g_loggedInvalidRegionBoxes;
+static std::map<void *, std::set<void *>> g_nativeSurfacesThisFrame;
+
+struct SNativeCoverageStats {
+  std::string windowAddress;
+  size_t expectedSurfaceCount = 0;
+  size_t nativeSurfaceCount = 0;
+  bool nativeShaderUsed = false;
+  bool postWindowSkipped = false;
+  bool mixedCoverage = false;
+  bool tintAllSurfaces = false;
+};
+
+struct SLowLevelWindowStats {
+  std::string windowAddress;
+  size_t renderTextureCalls = 0;
+  size_t renderTextureInternalCalls = 0;
+  size_t scopedHits = 0;
+  size_t currentWindowHits = 0;
+  size_t ownerWindowHits = 0;
+};
+
+struct SLowLevelProbeStats {
+  size_t renderTextureCalls = 0;
+  size_t renderTextureInternalCalls = 0;
+  size_t callsWithoutWindow = 0;
+  size_t callsWithScopeArmed = 0;
+  std::map<std::string, SLowLevelWindowStats> byWindow;
+};
+
+static std::map<std::string, SNativeCoverageStats> g_lastCoverageStatsByWindow;
+static std::string g_lastCoverageWindowAddress;
+static std::map<std::string, std::map<std::string, size_t>>
+    g_nativeRejectCountsByWindow;
+static SLowLevelProbeStats g_lowLevelProbeStats;
+
+struct SNativeRenderScope {
+  bool active = false;
+  PHLWINDOW window;
+};
+
+static SNativeRenderScope g_nativeRenderScope;
 
 struct SConfig {
   float r, g, b, a;
@@ -79,10 +124,15 @@ static std::chrono::steady_clock::time_point g_suspendUntil =
     std::chrono::steady_clock::time_point::min();
 static std::chrono::steady_clock::time_point g_lastCursorInvalidation =
     std::chrono::steady_clock::time_point::min();
+static std::optional<Vector2D> g_lastCursorCoords;
 static bool g_wasSuspendedLastFrame = false;
 static bool g_runtimeProbeSafeForLowerLevel = false;
 
 static void redrawAll();
+static bool normalizeBoxForRegion(CBox &box, const char *label,
+                                  double pad = 0.0);
+static std::string boolWord(bool value);
+static std::string jsonEscape(const std::string &value);
 
 struct SRuntimeSymbolProbe {
   std::string query;
@@ -103,6 +153,7 @@ struct SRuntimeProbeReport {
   SRuntimeSymbolProbe useShader;
   SRuntimeSymbolProbe getSurfaceShader;
   SRuntimeSymbolProbe renderTexture;
+  SRuntimeSymbolProbe renderTextureInternal;
   SRuntimeSymbolProbe renderTextureInternalWithDamage;
   SRuntimeSymbolProbe decorationGetDataFor;
   bool supportsModernShaderInsertion = false;
@@ -153,6 +204,8 @@ static bool g_notifiedFallbackDebugPath = false;
 static bool g_notifiedSurfaceDebugCount = false;
 static CFunctionHook *g_getSurfaceShaderHook = nullptr;
 static CFunctionHook *g_useShaderHook = nullptr;
+static CFunctionHook *g_renderTextureHook = nullptr;
+static CFunctionHook *g_renderTextureInternalHook = nullptr;
 static std::map<uint8_t, SNativeShaderVariant> g_nativeSurfaceShaders;
 static std::set<uint8_t> g_nativeSurfaceShaderFailures;
 static SNativeShaderVariant g_nativeExtShader;
@@ -284,7 +337,10 @@ void main() {
         saturation
     );
     float preserve = clamp(max(brightProtect, saturatedProtect), 0.0, 1.0);
-    float alpha = tintStrength * (1.0 - preserve) * (1.0 - luminance) * windowAlpha * contentAlpha;
+    // Dark-region hardening: flatten tiny luminance deltas near black to avoid
+    // cursor-adjacent micro flicker on high-contrast content.
+    float darkness = 1.0 - pow(clamp(luminance, 0.0, 1.0), 1.35);
+    float alpha = tintStrength * (1.0 - preserve) * darkness * windowAlpha * contentAlpha;
     alpha = clamp(alpha, 0.0, 1.0);
 
     if (debugVisualize == 1) {
@@ -387,7 +443,8 @@ void main() {
         saturation
     );
     float preserve = clamp(max(brightProtect, saturatedProtect), 0.0, 1.0);
-    float alpha = tintStrength * (1.0 - preserve) * (1.0 - luminance) * windowAlpha * contentAlpha;
+    float darkness = 1.0 - pow(clamp(luminance, 0.0, 1.0), 1.35);
+    float alpha = tintStrength * (1.0 - preserve) * darkness * windowAlpha * contentAlpha;
     alpha = clamp(alpha, 0.0, 1.0);
 
     if (debugVisualize == 1) {
@@ -557,8 +614,9 @@ void main() {
     );
     float preserve = clamp(max(brightProtect, saturatedProtect), 0.0, 1.0);
 
+    float darkness = 1.0 - pow(clamp(luminance, 0.0, 1.0), 1.35);
     vec4 basePremul = pixColor * alpha;
-    float overlayAlpha = darkwindowTintStrength * (1.0 - preserve) * (1.0 - luminance) * basePremul.a;
+    float overlayAlpha = darkwindowTintStrength * (1.0 - preserve) * darkness * basePremul.a;
     overlayAlpha = clamp(overlayAlpha, 0.0, 1.0);
 
     if (darkwindowDebugVisualize == 1) {
@@ -653,8 +711,9 @@ void main() {
     );
     float preserve = clamp(max(brightProtect, saturatedProtect), 0.0, 1.0);
 
+    float darkness = 1.0 - pow(clamp(luminance, 0.0, 1.0), 1.35);
     vec4 basePremul = pixColor * alpha;
-    float overlayAlpha = darkwindowTintStrength * (1.0 - preserve) * (1.0 - luminance) * basePremul.a;
+    float overlayAlpha = darkwindowTintStrength * (1.0 - preserve) * darkness * basePremul.a;
     overlayAlpha = clamp(overlayAlpha, 0.0, 1.0);
 
     if (darkwindowDebugVisualize == 1) {
@@ -798,37 +857,436 @@ static PHLWINDOW currentWindowForNativePath(CHyprOpenGLImpl *self) {
   return self->m_renderData.currentWindow.lock();
 }
 
+static SP<CWLSurfaceResource> currentSurfaceForNativePath(CHyprOpenGLImpl *self) {
+  if (!self)
+    return nullptr;
+  return self->m_renderData.surface.lock();
+}
+
+static void armNativeRenderScope(CHyprOpenGLImpl *self) {
+  const auto window = currentWindowForNativePath(self);
+  g_nativeRenderScope.active = true;
+  g_nativeRenderScope.window = window;
+}
+
+static void clearNativeRenderScope() { g_nativeRenderScope = {}; }
+
+static PHLWINDOW scopedWindowForNativePath() {
+  if (!g_nativeRenderScope.active)
+    return nullptr;
+  return g_nativeRenderScope.window;
+}
+
+static PHLWINDOW surfaceOwnerWindowForNativePath(CHyprOpenGLImpl *self) {
+  if (!self || !g_pCompositor)
+    return nullptr;
+
+  const auto surface = currentSurfaceForNativePath(self);
+  if (!surface)
+    return nullptr;
+
+  return g_pCompositor->getWindowFromSurface(surface);
+}
+
+static PHLWINDOW effectiveWindowForNativePath(CHyprOpenGLImpl *self) {
+  const auto currentWindow = currentWindowForNativePath(self);
+  if (currentWindow)
+    return currentWindow;
+
+  const auto scopedWindow = scopedWindowForNativePath();
+  if (scopedWindow)
+    return scopedWindow;
+
+  return surfaceOwnerWindowForNativePath(self);
+}
+
+static bool ensureNativeRenderScopeFromRenderPath(CHyprOpenGLImpl *self,
+                                                  const PHLWINDOW &fallback) {
+  if (g_nativeRenderScope.active && g_nativeRenderScope.window)
+    return true;
+
+  if (!self)
+    return false;
+
+  if (const auto currentWindow = currentWindowForNativePath(self)) {
+    g_nativeRenderScope.active = true;
+    g_nativeRenderScope.window = currentWindow;
+    return true;
+  }
+
+  if (const auto ownerWindow = surfaceOwnerWindowForNativePath(self)) {
+    g_nativeRenderScope.active = true;
+    g_nativeRenderScope.window = ownerWindow;
+    return true;
+  }
+
+  if (fallback) {
+    g_nativeRenderScope.active = true;
+    g_nativeRenderScope.window = fallback;
+    return true;
+  }
+
+  return false;
+}
+
+static bool nativeRenderScopeMatches(CHyprOpenGLImpl *self,
+                                     const PHLWINDOW &window) {
+  if (!self || !window)
+    return false;
+
+  const auto currentWindow = currentWindowForNativePath(self);
+  const auto ownerWindow = surfaceOwnerWindowForNativePath(self);
+
+  // Fast-path: if render data already resolves to this window, accept immediately.
+  if (currentWindow && currentWindow.get() == window.get())
+    return true;
+  if (ownerWindow && ownerWindow.get() == window.get())
+    return true;
+
+  ensureNativeRenderScopeFromRenderPath(self, window);
+  if (!g_nativeRenderScope.active)
+    return false;
+
+  if (currentWindow) {
+    if (!g_nativeRenderScope.window)
+      g_nativeRenderScope.window = currentWindow;
+    else if (g_nativeRenderScope.window.get() != currentWindow.get())
+      return false;
+  } else if (ownerWindow) {
+    if (!g_nativeRenderScope.window)
+      g_nativeRenderScope.window = ownerWindow;
+    else if (g_nativeRenderScope.window.get() != ownerWindow.get())
+      return false;
+  } else if (!g_nativeRenderScope.window) {
+    g_nativeRenderScope.window = window;
+  }
+
+  return g_nativeRenderScope.window &&
+         g_nativeRenderScope.window.get() == window.get();
+}
+
+static bool surfaceBelongsToWindow(const SP<CWLSurfaceResource> &surface,
+                                   const PHLWINDOW &window) {
+  if (!surface || !window)
+    return false;
+
+  const auto rootSurface = window->resource();
+  if (!rootSurface)
+    return false;
+  if (surface == rootSurface)
+    return true;
+
+  bool found = false;
+  rootSurface->breadthfirst(
+      [&](SP<CWLSurfaceResource> candidate, const Vector2D &, void *) {
+        if (!candidate || found)
+          return;
+        if (candidate == surface)
+          found = true;
+      },
+      nullptr);
+
+  return found;
+}
+
+static std::string windowAddressString(const PHLWINDOW &window) {
+  if (!window)
+    return "";
+  return std::format("0x{:x}", (uintptr_t)window.get());
+}
+
+static SLowLevelWindowStats &
+lowLevelWindowStatsFor(const std::string &windowAddress) {
+  auto &stats = g_lowLevelProbeStats.byWindow[windowAddress];
+  if (stats.windowAddress.empty())
+    stats.windowAddress = windowAddress;
+  return stats;
+}
+
+static void recordLowLevelCall(CHyprOpenGLImpl *self,
+                               const bool renderTextureInternalCall) {
+  if (renderTextureInternalCall)
+    ++g_lowLevelProbeStats.renderTextureInternalCalls;
+  else
+    ++g_lowLevelProbeStats.renderTextureCalls;
+
+  const auto currentWindow = currentWindowForNativePath(self);
+  const auto ownerWindow = surfaceOwnerWindowForNativePath(self);
+  const auto effectiveWindow = effectiveWindowForNativePath(self);
+
+  ensureNativeRenderScopeFromRenderPath(self, effectiveWindow);
+  const auto scopedWindow = scopedWindowForNativePath();
+  if (g_nativeRenderScope.active)
+    ++g_lowLevelProbeStats.callsWithScopeArmed;
+
+  if (!effectiveWindow) {
+    ++g_lowLevelProbeStats.callsWithoutWindow;
+    return;
+  }
+
+  auto &stats = lowLevelWindowStatsFor(windowAddressString(effectiveWindow));
+  if (renderTextureInternalCall)
+    ++stats.renderTextureInternalCalls;
+  else
+    ++stats.renderTextureCalls;
+
+  if (scopedWindow && scopedWindow.get() == effectiveWindow.get())
+    ++stats.scopedHits;
+  if (currentWindow && currentWindow.get() == effectiveWindow.get())
+    ++stats.currentWindowHits;
+  if (ownerWindow && ownerWindow.get() == effectiveWindow.get())
+    ++stats.ownerWindowHits;
+}
+
+static size_t countEligibleWindowSurfaces(const PHLWINDOW &window) {
+  if (!window)
+    return 0;
+
+  const auto rootSurface = window->resource();
+  if (!rootSurface)
+    return 0;
+
+  size_t count = 0;
+  rootSurface->breadthfirst(
+      [&](SP<CWLSurfaceResource> surface, const Vector2D &, void *) {
+        if (!surface)
+          return;
+
+        const auto texture = surface->m_current.texture;
+        if (!texture || texture->m_texID == 0)
+          return;
+
+        const bool isRootSurface = surface == rootSurface;
+        if (!g_config.tint_all_surfaces && !isRootSurface)
+          return;
+
+        ++count;
+      },
+      nullptr);
+
+  return count;
+}
+
+static void updateCoverageStats(const PHLWINDOW &window,
+                                const bool postWindowSkipped) {
+  if (!window)
+    return;
+
+  const auto address = windowAddressString(window);
+  const auto nativeIt = g_nativeSurfacesThisFrame.find((void *)window.get());
+  const size_t nativeSurfaceCount =
+      nativeIt == g_nativeSurfacesThisFrame.end() ? 0 : nativeIt->second.size();
+  const size_t expectedSurfaceCount = countEligibleWindowSurfaces(window);
+
+  SNativeCoverageStats stats;
+  stats.windowAddress = address;
+  stats.expectedSurfaceCount = expectedSurfaceCount;
+  stats.nativeSurfaceCount = nativeSurfaceCount;
+  stats.nativeShaderUsed = nativeSurfaceCount > 0;
+  stats.postWindowSkipped = postWindowSkipped;
+  stats.mixedCoverage =
+      stats.nativeShaderUsed &&
+      stats.expectedSurfaceCount > stats.nativeSurfaceCount;
+  stats.tintAllSurfaces = g_config.tint_all_surfaces;
+
+  g_lastCoverageStatsByWindow[address] = stats;
+  g_lastCoverageWindowAddress = address;
+}
+
+static std::string buildCoverageStatsTextReport(const std::string &query) {
+  const auto key = query.empty() ? g_lastCoverageWindowAddress : query;
+  if (key.empty())
+    return "No darkwindow coverage stats captured yet.";
+
+  const auto it = g_lastCoverageStatsByWindow.find(key);
+  if (it == g_lastCoverageStatsByWindow.end())
+    return std::format("No darkwindow coverage stats for {}", key);
+
+  const auto &stats = it->second;
+  std::ostringstream out;
+  out << "Hyprchroma native coverage stats\n";
+  out << "window: " << stats.windowAddress << "\n";
+  out << "native_shader_used: " << boolWord(stats.nativeShaderUsed) << "\n";
+  out << "post_window_skipped: " << boolWord(stats.postWindowSkipped) << "\n";
+  out << "tint_all_surfaces: " << boolWord(stats.tintAllSurfaces) << "\n";
+  out << "expected_surface_count: " << stats.expectedSurfaceCount << "\n";
+  out << "native_surface_count: " << stats.nativeSurfaceCount << "\n";
+  out << "mixed_coverage: " << boolWord(stats.mixedCoverage) << "\n";
+  const auto rejectIt = g_nativeRejectCountsByWindow.find(stats.windowAddress);
+  if (rejectIt != g_nativeRejectCountsByWindow.end() &&
+      !rejectIt->second.empty()) {
+    out << "native_reject_reasons:";
+    bool first = true;
+    for (const auto &[reason, count] : rejectIt->second) {
+      out << (first ? " " : ", ") << reason << "=" << count;
+      first = false;
+    }
+    out << "\n";
+  }
+  out << "recommendation: ";
+  if (!stats.nativeShaderUsed)
+    out << "native path did not hit this window; inspect activation path";
+  else if (stats.mixedCoverage)
+    out << "patch candidate: native coverage incomplete; inspect lower-level "
+           "render path(s)";
+  else
+    out << "coverage complete on captured surfaces; remaining artifact likely "
+           "needs compositing-level refactor";
+  return out.str();
+}
+
+static std::string buildCoverageStatsJsonReport(const std::string &query) {
+  const auto key = query.empty() ? g_lastCoverageWindowAddress : query;
+  if (key.empty())
+    return "{\"error\":\"no_stats\"}";
+
+  const auto it = g_lastCoverageStatsByWindow.find(key);
+  if (it == g_lastCoverageStatsByWindow.end())
+    return std::format("{{\"error\":\"unknown_window\",\"window\":\"{}\"}}",
+                       jsonEscape(key));
+
+  const auto &stats = it->second;
+  std::ostringstream out;
+  out << "{";
+  out << "\"window\":\"" << jsonEscape(stats.windowAddress) << "\",";
+  out << "\"native_shader_used\":"
+      << (stats.nativeShaderUsed ? "true" : "false") << ",";
+  out << "\"post_window_skipped\":"
+      << (stats.postWindowSkipped ? "true" : "false") << ",";
+  out << "\"tint_all_surfaces\":"
+      << (stats.tintAllSurfaces ? "true" : "false") << ",";
+  out << "\"expected_surface_count\":" << stats.expectedSurfaceCount << ",";
+  out << "\"native_surface_count\":" << stats.nativeSurfaceCount << ",";
+  out << "\"mixed_coverage\":"
+      << (stats.mixedCoverage ? "true" : "false");
+  const auto rejectIt = g_nativeRejectCountsByWindow.find(stats.windowAddress);
+  if (rejectIt != g_nativeRejectCountsByWindow.end() &&
+      !rejectIt->second.empty()) {
+    out << ",\"native_reject_reasons\":{";
+    bool first = true;
+    for (const auto &[reason, count] : rejectIt->second) {
+      if (!first)
+        out << ",";
+      out << "\"" << jsonEscape(reason) << "\":" << count;
+      first = false;
+    }
+    out << "}";
+  }
+  out << "}";
+  return out.str();
+}
+
+static std::string buildLowLevelProbeTextReport() {
+  std::ostringstream out;
+  out << "Hyprchroma lower-level call probe\n";
+  out << "renderTexture_calls: " << g_lowLevelProbeStats.renderTextureCalls
+      << "\n";
+  out << "renderTextureInternal_calls: "
+      << g_lowLevelProbeStats.renderTextureInternalCalls << "\n";
+  out << "calls_without_window: " << g_lowLevelProbeStats.callsWithoutWindow
+      << "\n";
+  out << "calls_with_scope_armed: " << g_lowLevelProbeStats.callsWithScopeArmed
+      << "\n";
+
+  if (g_lowLevelProbeStats.byWindow.empty()) {
+    out << "window_stats: none";
+    return out.str();
+  }
+
+  out << "window_stats:";
+  for (const auto &[windowAddress, stats] : g_lowLevelProbeStats.byWindow) {
+    out << "\n  - " << windowAddress << ": renderTexture="
+        << stats.renderTextureCalls
+        << ", renderTextureInternal=" << stats.renderTextureInternalCalls
+        << ", scoped_hits=" << stats.scopedHits
+        << ", current_hits=" << stats.currentWindowHits
+        << ", owner_hits=" << stats.ownerWindowHits;
+  }
+  return out.str();
+}
+
+static std::string buildLowLevelProbeJsonReport() {
+  std::ostringstream out;
+  out << "{";
+  out << "\"renderTexture_calls\":" << g_lowLevelProbeStats.renderTextureCalls
+      << ",";
+  out << "\"renderTextureInternal_calls\":"
+      << g_lowLevelProbeStats.renderTextureInternalCalls << ",";
+  out << "\"calls_without_window\":" << g_lowLevelProbeStats.callsWithoutWindow
+      << ",";
+  out << "\"calls_with_scope_armed\":"
+      << g_lowLevelProbeStats.callsWithScopeArmed << ",";
+  out << "\"window_stats\":[";
+
+  bool first = true;
+  for (const auto &[windowAddress, stats] : g_lowLevelProbeStats.byWindow) {
+    if (!first)
+      out << ",";
+    out << "{";
+    out << "\"window\":\"" << jsonEscape(windowAddress) << "\",";
+    out << "\"renderTexture_calls\":" << stats.renderTextureCalls << ",";
+    out << "\"renderTextureInternal_calls\":" << stats.renderTextureInternalCalls
+        << ",";
+    out << "\"scoped_hits\":" << stats.scopedHits << ",";
+    out << "\"current_hits\":" << stats.currentWindowHits << ",";
+    out << "\"owner_hits\":" << stats.ownerWindowHits;
+    out << "}";
+    first = false;
+  }
+
+  out << "]";
+  out << "}";
+  return out.str();
+}
+
 static bool shouldUseNativeSurfaceShader(CHyprOpenGLImpl *self,
                                          const PHLWINDOW &window) {
+  const auto recordReject = [&](const char *reason) {
+    if (window && reason)
+      ++g_nativeRejectCountsByWindow[windowAddressString(window)][reason];
+    return false;
+  };
+
   if (!self || !window)
     return false;
   if (!g_config.native_surface_shader_pass)
-    return false;
+    return recordReject("disabled_by_config");
   if (!g_runtimeProbeSafeForLowerLevel)
-    return false;
+    return recordReject("runtime_probe_not_safe");
   if (g_config.a <= 0.0f)
-    return false;
+    return recordReject("zero_alpha");
   if (g_config.debug_visualize == 6)
-    return false;
+    return recordReject("debug_visualize_block");
   if (!isShaded(window))
-    return false;
+    return recordReject("not_shaded");
   if (!g_config.enable_on_fullscreen && window->isFullscreen())
-    return false;
+    return recordReject("fullscreen_blocked");
   if (window->isHidden())
-    return false;
+    return recordReject("hidden_window");
 
   const auto workspace = window->m_workspace;
   if (!workspace || !workspace->m_visible)
-    return false;
+    return recordReject("workspace_not_visible");
 
   if (std::chrono::steady_clock::now() < g_suspendUntil)
-    return false;
+    return recordReject("suspended");
 
-  if (!g_config.tint_all_surfaces) {
-    const auto rootSurface = window->resource();
-    if (!rootSurface || self->m_renderData.surface != rootSurface)
-      return false;
-  }
+  if (self->m_renderData.currentLS.lock())
+    return recordReject("layer_surface_active");
+
+  // Keep scope arm for diagnostics, but do not block activation on scope alone.
+  ensureNativeRenderScopeFromRenderPath(self, window);
+  if (!nativeRenderScopeMatches(self, window) && g_nativeRenderScope.active)
+    ++g_nativeRejectCountsByWindow[windowAddressString(window)]["scope_mismatch"];
+
+  const auto currentSurface = currentSurfaceForNativePath(self);
+  if (!currentSurface)
+    return recordReject("surface_missing");
+  if (!surfaceBelongsToWindow(currentSurface, window))
+    return recordReject("surface_not_owned");
+
+  if (!g_config.tint_all_surfaces && currentSurface != window->resource())
+    return recordReject("subsurface_blocked");
 
   return true;
 }
@@ -915,12 +1373,18 @@ findNativeShaderVariant(const WP<CShader> &shader) {
 
 using PGetSurfaceShaderFn = WP<CShader> (*)(CHyprOpenGLImpl *, uint8_t);
 using PUseShaderFn = WP<CShader> (*)(CHyprOpenGLImpl *, WP<CShader>);
+using PRenderTextureFn = void (*)(
+    CHyprOpenGLImpl *, SP<CTexture>, const CBox &,
+    CHyprOpenGLImpl::STextureRenderData);
+using PRenderTextureInternalFn = void (*)(
+    CHyprOpenGLImpl *, SP<CTexture>, const CBox &,
+    const CHyprOpenGLImpl::STextureRenderData &);
 
 static WP<CShader> hkGetSurfaceShader(CHyprOpenGLImpl *self, uint8_t features) {
   const auto original =
       reinterpret_cast<PGetSurfaceShaderFn>(g_getSurfaceShaderHook->m_original);
 
-  const auto window = currentWindowForNativePath(self);
+  const auto window = effectiveWindowForNativePath(self);
   if (!shouldUseNativeSurfaceShader(self, window))
     return original(self, features);
 
@@ -934,7 +1398,8 @@ static WP<CShader> hkUseShader(CHyprOpenGLImpl *self, WP<CShader> shader) {
   const auto original =
       reinterpret_cast<PUseShaderFn>(g_useShaderHook->m_original);
 
-  const auto window = currentWindowForNativePath(self);
+  const auto window = effectiveWindowForNativePath(self);
+  const auto surface = currentSurfaceForNativePath(self);
   const bool allowNative = shouldUseNativeSurfaceShader(self, window);
 
   if (allowNative && self && self->m_shaders &&
@@ -950,6 +1415,12 @@ static WP<CShader> hkUseShader(CHyprOpenGLImpl *self, WP<CShader> shader) {
     passNativeUniforms(variant->uniforms);
     if (window)
       g_nativeShadedThisFrame.insert((void *)window.get());
+    if (window && surface) {
+      g_nativeSurfacesThisFrame[(void *)window.get()].insert((void *)surface.get());
+      updateCoverageStats(window, true);
+    } else if (window) {
+      updateCoverageStats(window, true);
+    }
     if (!g_loggedNativeShaderPath) {
       Log::logger->log(
           Log::INFO,
@@ -960,6 +1431,24 @@ static WP<CShader> hkUseShader(CHyprOpenGLImpl *self, WP<CShader> shader) {
   }
 
   return usedShader;
+}
+
+static void hkRenderTexture(CHyprOpenGLImpl *self, SP<CTexture> tex,
+                            const CBox &box,
+                            CHyprOpenGLImpl::STextureRenderData data) {
+  const auto original =
+      reinterpret_cast<PRenderTextureFn>(g_renderTextureHook->m_original);
+  recordLowLevelCall(self, false);
+  original(self, std::move(tex), box, data);
+}
+
+static void hkRenderTextureInternal(
+    CHyprOpenGLImpl *self, SP<CTexture> tex, const CBox &box,
+    const CHyprOpenGLImpl::STextureRenderData &data) {
+  const auto original = reinterpret_cast<PRenderTextureInternalFn>(
+      g_renderTextureInternalHook->m_original);
+  recordLowLevelCall(self, true);
+  original(self, std::move(tex), box, data);
 }
 
 static GLuint compileShaderRaw(GLenum type, const char *source) {
@@ -1000,6 +1489,49 @@ static GLuint linkProgramRaw(GLuint vert, GLuint frag) {
     return 0;
   }
   return prog;
+}
+
+static bool normalizeBoxForRegion(CBox &box, const char *label,
+                                  const double pad) {
+  if (!std::isfinite(box.x) || !std::isfinite(box.y) || !std::isfinite(box.w) ||
+      !std::isfinite(box.h)) {
+    if (label && g_loggedInvalidRegionBoxes.insert(label).second) {
+      Log::logger->log(
+          Log::WARN,
+          "[Hyprchroma] Dropping non-finite {} x={} y={} w={} h={}", label,
+          box.x, box.y, box.w, box.h);
+    }
+    return false;
+  }
+
+  box.round();
+  if (pad != 0.0)
+    box.expand(pad);
+  box.noNegativeSize();
+
+  constexpr double MAX_REGION_COORD = 10000000.0;
+  const double x1 = std::clamp(box.x, -MAX_REGION_COORD, MAX_REGION_COORD);
+  const double y1 = std::clamp(box.y, -MAX_REGION_COORD, MAX_REGION_COORD);
+  const double x2 =
+      std::clamp(box.x + box.w, -MAX_REGION_COORD, MAX_REGION_COORD);
+  const double y2 =
+      std::clamp(box.y + box.h, -MAX_REGION_COORD, MAX_REGION_COORD);
+
+  box.x = std::min(x1, x2);
+  box.y = std::min(y1, y2);
+  box.w = std::max(0.0, std::abs(x2 - x1));
+  box.h = std::max(0.0, std::abs(y2 - y1));
+
+  if (box.w <= 0.0 || box.h <= 0.0) {
+    if (label && g_loggedInvalidRegionBoxes.insert(label).second) {
+      Log::logger->log(
+          Log::WARN,
+          "[Hyprchroma] Dropping empty/invalid {} after normalization", label);
+    }
+    return false;
+  }
+
+  return true;
 }
 
 static void queryUniformLocations(
@@ -1500,10 +2032,21 @@ void CChromaPassElement::draw(const CRegion &damage) {
   static constexpr double DAMAGE_PAD = 1.0;
   const bool useFullWindowDamage =
       m_data.unifiedWindowPass && surfacesToDraw != &m_data.surfaces;
-  const CRegion effectiveDamage =
-      useFullWindowDamage
-          ? CRegion(m_data.box.copy().round().expand(DAMAGE_PAD))
-          : damage.copy().expand(DAMAGE_PAD);
+  CBox normalizedWindowBox = m_data.box.copy();
+  if (!normalizeBoxForRegion(normalizedWindowBox, "window damage box",
+                             DAMAGE_PAD))
+    return;
+
+  CBox normalizedClipBox = m_data.clipBox.copy();
+  const bool hasNormalizedClipBox =
+      m_data.clipBox.w != 0 && m_data.clipBox.h != 0 &&
+      normalizeBoxForRegion(normalizedClipBox, "clip box", DAMAGE_PAD);
+
+  CRegion effectiveDamage = useFullWindowDamage
+                                ? CRegion(normalizedWindowBox)
+                                : damage.copy().expand(DAMAGE_PAD);
+  effectiveDamage.rationalize();
+
   // Save GL state
   GLint prevProgram = 0;
   glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
@@ -1556,9 +2099,10 @@ void CChromaPassElement::draw(const CRegion &damage) {
   glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
 
   CRegion clearRegion = effectiveDamage.copy();
-  clearRegion.intersect(m_data.box.copy().round().expand(DAMAGE_PAD));
-  if (m_data.clipBox.w != 0 && m_data.clipBox.h != 0)
-    clearRegion.intersect(m_data.clipBox.copy().round().expand(DAMAGE_PAD));
+  clearRegion.intersect(normalizedWindowBox);
+  if (hasNormalizedClipBox)
+    clearRegion.intersect(normalizedClipBox);
+  clearRegion.rationalize();
 
   // Clear our stencil bit before drawing so stale claims from previous frames
   // cannot punch holes in the current frame.
@@ -1654,10 +2198,18 @@ void CChromaPassElement::draw(const CRegion &damage) {
                     m_data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
     glUniform1i(locWindowTex, 0);
 
+    CBox normalizedSurfaceBox = surf.box.copy();
+    if (!normalizeBoxForRegion(normalizedSurfaceBox,
+                               surf.isRootSurface ? "root surface box"
+                                                  : "subsurface box",
+                               DAMAGE_PAD))
+      continue;
+
     CRegion surfDamage = effectiveDamage.copy();
-    surfDamage.intersect(surf.box.copy().round().expand(DAMAGE_PAD));
-    if (m_data.clipBox.w != 0 && m_data.clipBox.h != 0)
-      surfDamage.intersect(m_data.clipBox.copy().round().expand(DAMAGE_PAD));
+    surfDamage.intersect(normalizedSurfaceBox);
+    if (hasNormalizedClipBox)
+      surfDamage.intersect(normalizedClipBox);
+    surfDamage.rationalize();
 
     for (auto &rect : surfDamage.getRects()) {
       g_pHyprOpenGL->scissor(&rect);
@@ -1805,10 +2357,12 @@ static void invalidateFromCursorMotion(const Vector2D &, Event::SCallbackInfo &)
   if (g_config.cursor_invalidation_mode == 3) {
     redrawAll();
     g_lastCursorInvalidation = now;
+    g_lastCursorCoords = g_pInputManager->getMouseCoordsInternal();
     return;
   }
 
   const auto cursor = g_pInputManager->getMouseCoordsInternal();
+  const auto previousCursor = g_lastCursorCoords.value_or(cursor);
   const auto radius = static_cast<double>(g_config.cursor_invalidation_radius);
   bool invalidatedAnything = false;
 
@@ -1823,7 +2377,8 @@ static void invalidateFromCursorMotion(const Vector2D &, Event::SCallbackInfo &)
     const auto box = window->getWindowMainSurfaceBox();
     const bool shouldInvalidate =
         g_config.cursor_invalidation_mode == 2 ||
-        pointInExpandedBox(cursor, box, radius);
+        pointInExpandedBox(cursor, box, radius) ||
+        pointInExpandedBox(previousCursor, box, radius);
 
     if (!shouldInvalidate)
       continue;
@@ -1836,6 +2391,13 @@ static void invalidateFromCursorMotion(const Vector2D &, Event::SCallbackInfo &)
 
   if (invalidatedAnything)
     g_lastCursorInvalidation = now;
+
+  // Mode 1: force a full redraw after targeted damages to avoid cursor trails
+  // caused by stale regions when the hardware cursor crosses high-contrast areas.
+  if (invalidatedAnything && g_config.cursor_invalidation_mode == 1)
+    redrawAll();
+
+  g_lastCursorCoords = cursor;
 }
 
 // ── Render hook ──
@@ -1844,6 +2406,9 @@ static void onRenderStage(eRenderStage stage) {
   if (stage == RENDER_BEGIN) {
     g_renderedThisFrame.clear();
     g_nativeShadedThisFrame.clear();
+    g_nativeSurfacesThisFrame.clear();
+    g_nativeRejectCountsByWindow.clear();
+    clearNativeRenderScope();
 
     const bool suspendedNow =
         std::chrono::steady_clock::now() < g_suspendUntil;
@@ -1865,6 +2430,14 @@ static void onRenderStage(eRenderStage stage) {
     return;
   }
 
+  if (stage == RENDER_PRE_WINDOW) {
+    armNativeRenderScope(g_pHyprOpenGL.get());
+    return;
+  }
+
+  if (stage == RENDER_POST_WINDOW)
+    clearNativeRenderScope();
+
   if (stage != RENDER_POST_WINDOW)
     return;
 
@@ -1878,7 +2451,11 @@ static void onRenderStage(eRenderStage stage) {
   if (!window || !isShaded(window))
     return;
 
-  if (g_nativeShadedThisFrame.contains((void *)window.get()))
+  const bool postWindowSkipped =
+      g_nativeShadedThisFrame.contains((void *)window.get());
+  updateCoverageStats(window, postWindowSkipped);
+
+  if (postWindowSkipped)
     return;
 
   if (!g_config.enable_on_fullscreen && window->isFullscreen())
@@ -2231,6 +2808,8 @@ static SRuntimeProbeReport collectRuntimeProbeReport() {
       "getSurfaceShader", "CHyprOpenGLImpl::getSurfaceShader");
   report.renderTexture =
       probeFunctionSymbol("renderTexture", "CHyprOpenGLImpl::renderTexture");
+  report.renderTextureInternal = probeFunctionSymbol(
+      "renderTextureInternal", "CHyprOpenGLImpl::renderTextureInternal");
   report.renderTextureInternalWithDamage =
       probeFunctionSymbol("renderTextureInternalWithDamage",
                           "CHyprOpenGLImpl::renderTextureInternalWithDamage");
@@ -2274,6 +2853,7 @@ static std::string
 buildRuntimeProbeTextReport(const SRuntimeProbeReport &report) {
   std::ostringstream out;
   out << "Hyprchroma runtime probe\n";
+  out << "probe_format_version: 2\n";
   out << "runtime.tag: " << report.runtimeVersion.tag << "\n";
   out << "runtime.hash: " << report.runtimeVersion.hash << "\n";
   out << "runtime.branch: " << report.runtimeVersion.branch << "\n";
@@ -2308,10 +2888,15 @@ buildRuntimeProbeTextReport(const SRuntimeProbeReport &report) {
   out << "\n"
       << formatSymbolProbeSummary(report.renderTexture) << "\n";
   out << "\n"
+      << formatSymbolProbeSummary(report.renderTextureInternal) << "\n";
+  out << "\n"
       << formatSymbolProbeSummary(report.renderTextureInternalWithDamage)
       << "\n";
   out << "\n"
       << formatSymbolProbeSummary(report.decorationGetDataFor);
+
+  out << "\n\n" << buildCoverageStatsTextReport(g_lastCoverageWindowAddress);
+  out << "\n\n" << buildLowLevelProbeTextReport();
 
   return out.str();
 }
@@ -2342,6 +2927,7 @@ buildRuntimeProbeJsonReport(const SRuntimeProbeReport &report) {
 
   std::ostringstream out;
   out << "{";
+  out << "\"probe_format_version\":2,";
   out << "\"runtime\":{";
   out << "\"tag\":\"" << jsonEscape(report.runtimeVersion.tag) << "\",";
   out << "\"hash\":\"" << jsonEscape(report.runtimeVersion.hash) << "\",";
@@ -2381,11 +2967,19 @@ buildRuntimeProbeJsonReport(const SRuntimeProbeReport &report) {
   out << "\"getSurfaceShader\":" << dumpSymbolProbe(report.getSurfaceShader)
       << ",";
   out << "\"renderTexture\":" << dumpSymbolProbe(report.renderTexture) << ",";
+  out << "\"renderTextureInternal\":"
+      << dumpSymbolProbe(report.renderTextureInternal) << ",";
   out << "\"renderTextureInternalWithDamage\":"
       << dumpSymbolProbe(report.renderTextureInternalWithDamage) << ",";
   out << "\"decorationGetDataFor\":"
       << dumpSymbolProbe(report.decorationGetDataFor);
   out << "},";
+  out << "\"coverage_last\":";
+  if (!g_lastCoverageWindowAddress.empty())
+    out << buildCoverageStatsJsonReport(g_lastCoverageWindowAddress) << ",";
+  else
+    out << "null,";
+  out << "\"lower_level_probe\":" << buildLowLevelProbeJsonReport() << ",";
   out << "\"recommendation\":\"" << jsonEscape(report.recommendation) << "\"";
   out << "}";
   return out.str();
@@ -2621,18 +3215,40 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
     const bool hookedUseShader = installHook(
         "useShader", "CHyprOpenGLImpl::useShader",
         reinterpret_cast<void *>(hkUseShader), g_useShaderHook);
+    const bool hookedRenderTexture = installHook(
+        "renderTexture",
+        "CHyprOpenGLImpl::renderTexture(Hyprutils::Memory::CSharedPointer<"
+        "CTexture>, Hyprutils::Math::CBox const&, "
+        "CHyprOpenGLImpl::STextureRenderData)",
+        reinterpret_cast<void *>(hkRenderTexture), g_renderTextureHook);
+    const bool hookedRenderTextureInternal = installHook(
+        "renderTextureInternal", "CHyprOpenGLImpl::renderTextureInternal",
+        reinterpret_cast<void *>(hkRenderTextureInternal),
+        g_renderTextureInternalHook);
 
-    if (hookedGetSurfaceShader && hookedUseShader && !g_loggedNativeHooks) {
+    if (hookedGetSurfaceShader && hookedUseShader && hookedRenderTexture &&
+        hookedRenderTextureInternal && !g_loggedNativeHooks) {
       Log::logger->log(
           Log::INFO,
           "[Hyprchroma] Installed guarded lower-level hooks "
-          "(getSurfaceShader/useShader)");
+          "(getSurfaceShader/useShader/renderTexture/renderTextureInternal)");
       g_loggedNativeHooks = true;
     }
   }
 
   g_runtimeProbeCommand = HyprlandAPI::registerHyprCtlCommand(
       handle, {.name = "darkwindowprobe",
+               .exact = true,
+               .fn =
+                   [](eHyprCtlOutputFormat format, std::string) {
+                     const auto report = collectRuntimeProbeReport();
+                     return format == FORMAT_JSON
+                                ? buildRuntimeProbeJsonReport(report)
+                                : buildRuntimeProbeTextReport(report);
+                   }});
+
+  g_runtimeProbeCommandV2 = HyprlandAPI::registerHyprCtlCommand(
+      handle, {.name = "darkwindowprobe2",
                .exact = true,
                .fn =
                    [](eHyprCtlOutputFormat format, std::string) {
@@ -2650,6 +3266,15 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
     Log::logger->log(Log::INFO,
                     "[Hyprchroma] hyprctl command registration ok for "
                      "darkwindowprobe");
+
+  if (!g_runtimeProbeCommandV2)
+    Log::logger->log(
+        Log::WARN,
+        "[Hyprchroma] Failed to register hyprctl command darkwindowprobe2");
+  else
+    Log::logger->log(Log::INFO,
+                     "[Hyprchroma] hyprctl command registration ok for "
+                     "darkwindowprobe2");
 
   HyprlandAPI::addNotification(handle,
                                "[DarkWindow] Registered v3.4.0 "
@@ -2673,6 +3298,10 @@ APICALL EXPORT void pluginExit() {
     HyprlandAPI::unregisterHyprCtlCommand(pHandle, g_runtimeProbeCommand);
     g_runtimeProbeCommand.reset();
   }
+  if (g_runtimeProbeCommandV2) {
+    HyprlandAPI::unregisterHyprCtlCommand(pHandle, g_runtimeProbeCommandV2);
+    g_runtimeProbeCommandV2.reset();
+  }
   if (g_useShaderHook) {
     HyprlandAPI::removeFunctionHook(pHandle, g_useShaderHook);
     g_useShaderHook = nullptr;
@@ -2681,12 +3310,25 @@ APICALL EXPORT void pluginExit() {
     HyprlandAPI::removeFunctionHook(pHandle, g_getSurfaceShaderHook);
     g_getSurfaceShaderHook = nullptr;
   }
+  if (g_renderTextureHook) {
+    HyprlandAPI::removeFunctionHook(pHandle, g_renderTextureHook);
+    g_renderTextureHook = nullptr;
+  }
+  if (g_renderTextureInternalHook) {
+    HyprlandAPI::removeFunctionHook(pHandle, g_renderTextureInternalHook);
+    g_renderTextureInternalHook = nullptr;
+  }
   g_perWindowShaded.clear();
   g_nativeShadedThisFrame.clear();
+  g_nativeSurfacesThisFrame.clear();
   g_nativeSurfaceShaders.clear();
   g_nativeSurfaceShaderFailures.clear();
   g_nativeExtShader = {};
+  g_lastCoverageStatsByWindow.clear();
+  g_lastCoverageWindowAddress.clear();
+  g_lowLevelProbeStats = {};
   g_nativeExtShaderCompileAttempted = false;
+  g_lastCursorCoords.reset();
 
   if (g_chromaProgram) {
     glDeleteProgram(g_chromaProgram);

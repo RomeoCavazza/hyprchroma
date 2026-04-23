@@ -9,13 +9,34 @@
 Hyprchroma is a Hyprland plugin that applies a chromakey effect for global window background transparency without affecting readability
 
 ## Configuration
+
+This fork is configured through `plugin:darkwindow:*` keywords. A practical setup is to keep them in a dedicated `hyprchroma.conf` file and source it from `hyprland.conf`.
+
 ```conf
 # hyprland.conf
-windowrulev2 = plugin:chromakey,fullscreen:0
-chromakey_background = 7,8,17
+plugin = $HOME/.local/lib/libhypr-darkwindow.so
+source = ~/.config/hypr/theme/hyprchroma.conf
 ```
 
-Also adds 2 Dispatches `togglewindowchromakey WINDOW` and `togglechromakey` (for the active window)
+```conf
+# ~/.config/hypr/theme/hyprchroma.conf
+plugin:darkwindow:tint_r        = 0.20
+plugin:darkwindow:tint_g        = 0.70
+plugin:darkwindow:tint_b        = 1.00
+plugin:darkwindow:tint_strength = 0.058
+
+plugin:darkwindow:unified_window_pass = 0
+plugin:darkwindow:native_surface_shader_pass = 1
+plugin:darkwindow:suspend_on_workspace_switch_ms = 150
+```
+
+Useful optional knobs:
+
+- `plugin:darkwindow:cursor_invalidation_mode`
+- `plugin:darkwindow:cursor_invalidation_throttle_ms`
+- `plugin:darkwindow:cursor_invalidation_radius`
+
+Also adds 2 Dispatches `togglewindowchromakey WINDOW` and `togglechromakey` (for the active window).
 
 ## Installation
 
