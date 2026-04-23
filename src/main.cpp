@@ -790,6 +790,8 @@ static void passNativeUniforms(const SNativeShaderUniforms &uniforms) {
     glUniform1i(uniforms.debugVisualize, g_config.debug_visualize);
 }
 
+static bool isShaded(PHLWINDOW pWindow);
+
 static PHLWINDOW currentWindowForNativePath(CHyprOpenGLImpl *self) {
   if (!self)
     return nullptr;
@@ -808,8 +810,8 @@ static bool shouldUseNativeSurfaceShader(CHyprOpenGLImpl *self,
     return false;
   if (g_config.debug_visualize == 6)
     return false;
-//  if (!isShaded(window))
-//    return false;
+  if (!isShaded(window))
+    return false;
   if (!g_config.enable_on_fullscreen && window->isFullscreen())
     return false;
   if (window->isHidden())
