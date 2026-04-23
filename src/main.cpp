@@ -810,7 +810,7 @@ static bool shouldUseNativeSurfaceShader(CHyprOpenGLImpl *self,
     return false;
   if (g_config.debug_visualize == 6)
     return false;
-  if (g_pCompositor->m_pLastWindow.lock() == window)
+  if (g_pCompositor->isWindowActive(window))
     return false;
   if (!isShaded(window))
     return false;
