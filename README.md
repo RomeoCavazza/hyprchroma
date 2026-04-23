@@ -60,9 +60,6 @@ outputs = {
 }
 ```
 
-> [!NOTE]
-> This fork's flake is pinned for Hyprland `v0.54.2`. If you retarget Hyprland, update the plugin build target as well.
-
 ### Hyprpm
 Install using `hyprpm`
 ```sh
