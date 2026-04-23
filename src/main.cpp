@@ -1780,8 +1780,6 @@ static void updateConfig() {
 static bool isShaded(PHLWINDOW pWindow) {
   if (!pWindow)
     return false;
-  if (g_pCompositor->isWindowActive(pWindow))
-    return false;
   if (g_perWindowShaded.contains((void *)pWindow.get()))
     return true;
   return g_globalShaded;
