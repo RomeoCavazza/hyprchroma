@@ -810,8 +810,6 @@ static bool shouldUseNativeSurfaceShader(CHyprOpenGLImpl *self,
     return false;
   if (g_config.debug_visualize == 6)
     return false;
-  if (g_pCompositor->isWindowActive(window))
-    return false;
   if (!isShaded(window))
     return false;
   if (!g_config.enable_on_fullscreen && window->isFullscreen())
@@ -1781,6 +1779,8 @@ static void updateConfig() {
 
 static bool isShaded(PHLWINDOW pWindow) {
   if (!pWindow)
+    return false;
+  if (g_pCompositor->isWindowActive(pWindow))
     return false;
   if (g_perWindowShaded.contains((void *)pWindow.get()))
     return true;
