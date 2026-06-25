@@ -1,6 +1,6 @@
 {
   inputs = {
-    hyprland.url = "git+https://github.com/hyprwm/Hyprland?submodules=1&ref=refs/tags/v0.54.2";
+    hyprland.url = "git+https://github.com/hyprwm/Hyprland?submodules=1&ref=refs/tags/v0.55.4";
     nix-filter.url = "github:numtide/nix-filter";
   };
 
@@ -21,7 +21,7 @@
     in rec {
       hyprchroma = pkgs.stdenv.mkDerivation {
         pname = "hyprchroma";
-        version = "3.4.0-v054";
+        version = "3.4.1-v055";
         src = nix-filter.lib {
           root = ./.;
           include = [
@@ -40,7 +40,7 @@
 
         meta = with pkgs.lib; {
           homepage = "https://github.com/RomeoCavazza/Hyprchroma";
-          description = "Per-window glass tint overlay for Hyprland v0.54.2";
+          description = "Per-window glass tint overlay for Hyprland v0.55.4";
           license = licenses.mit;
           platforms = platforms.linux;
         };

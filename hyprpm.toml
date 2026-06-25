@@ -4,7 +4,7 @@ authors = ["alexhulbert", "RomeoCavazza"]
 description = "Per-window glass tint overlay for Hyprland"
 
 [hyprchroma]
-description = "Per-window glass tint overlay — v0.54.2 port"
+description = "Per-window glass tint overlay — v0.55.4 port"
 output = "hyprchroma.so"
 build = [
     "make all"

@@ -1,4 +1,4 @@
-// libhypr-darkwindow.so — Hyprchroma v3.4.0 for Hyprland v0.54.2
+// libhypr-darkwindow.so — Hyprchroma v3.4.1 for Hyprland v0.55.4
 //
 // Per-pixel luminance-based chromakey tint overlay.
 // Samples window surface texture to vary tint alpha: strong on dark pixels,
@@ -31,8 +31,10 @@
 #include <hyprland/src/managers/SeatManager.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
+#include <hyprland/src/config/shared/complex/ComplexDataTypes.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/render/gl/GLFramebuffer.hpp>
 #include <hyprland/src/render/pass/BorderPassElement.hpp>
 #include <hyprland/src/render/pass/PassElement.hpp>
 #include <hyprland/src/render/pass/RectPassElement.hpp>
@@ -41,6 +43,27 @@
 #include <hyprutils/math/Vector2D.hpp>
 
 using namespace Desktop::View;
+using CHyprOpenGLImpl = Render::GL::CHyprOpenGLImpl;
+using CFramebuffer = Render::GL::CGLFramebuffer;
+using CTexture = Render::ITexture;
+using Render::GL::SVertex;
+using Render::GL::fullVerts;
+using Render::GL::g_pHyprOpenGL;
+using Render::g_pShaderLoader;
+using Render::SH_FEAT_CM;
+using Render::SH_FEAT_DISCARD;
+using Render::SH_FEAT_RGBA;
+using Render::SH_FEAT_ROUNDING;
+using Render::SH_FEAT_SDR_MOD;
+using Render::SH_FEAT_TINT;
+using Render::SH_FEAT_TONEMAP;
+
+static auto &renderData() { return g_pHyprRenderer->m_renderData; }
+static GLenum textureTarget(const SP<CTexture> &texture) {
+  return texture && texture->m_type == Render::TEXTURE_EXTERNAL
+             ? GL_TEXTURE_EXTERNAL_OES
+             : GL_TEXTURE_2D;
+}
 
 static HANDLE pHandle = nullptr;
 static CHyprSignalListener g_renderListener;
@@ -771,7 +794,8 @@ preprocessShaderSource(std::string source,
 
 static std::map<std::string, std::string>
 buildNativeSurfaceShaderIncludes(CHyprOpenGLImpl *self, const uint8_t features) {
-  auto includes = self->m_includes;
+  auto includes = g_pShaderLoader ? g_pShaderLoader->includes()
+                                  : std::map<std::string, std::string>{};
 
   includes["get_rgb_pixel.glsl"] =
       includes[features & SH_FEAT_RGBA ? "get_rgba_pixel.glsl"
@@ -854,13 +878,13 @@ static bool isShaded(PHLWINDOW pWindow);
 static PHLWINDOW currentWindowForNativePath(CHyprOpenGLImpl *self) {
   if (!self)
     return nullptr;
-  return self->m_renderData.currentWindow.lock();
+  return renderData().currentWindow.lock();
 }
 
 static SP<CWLSurfaceResource> currentSurfaceForNativePath(CHyprOpenGLImpl *self) {
   if (!self)
     return nullptr;
-  return self->m_renderData.surface.lock();
+  return renderData().surface.lock();
 }
 
 static void armNativeRenderScope(CHyprOpenGLImpl *self) {
@@ -1271,9 +1295,6 @@ static bool shouldUseNativeSurfaceShader(CHyprOpenGLImpl *self,
   if (std::chrono::steady_clock::now() < g_suspendUntil)
     return recordReject("suspended");
 
-  if (self->m_renderData.currentLS.lock())
-    return recordReject("layer_surface_active");
-
   // Keep scope arm for diagnostics, but do not block activation on scope alone.
   ensureNativeRenderScopeFromRenderPath(self, window);
   if (!nativeRenderScopeMatches(self, window) && g_nativeRenderScope.active)
@@ -1340,7 +1361,9 @@ static SNativeShaderVariant *getNativeExtShaderVariant(CHyprOpenGLImpl *self) {
 
   auto shader = makeShared<CShader>();
   const auto fragment =
-      preprocessShaderSource(NATIVE_EXT_FRAG_SRC, self->m_includes);
+      preprocessShaderSource(NATIVE_EXT_FRAG_SRC,
+                             g_pShaderLoader ? g_pShaderLoader->includes()
+                                             : std::map<std::string, std::string>{});
 
   if (!shader->createProgram(self->m_shaders->TEXVERTSRC, fragment, true, true)) {
     Log::logger->log(
@@ -1401,13 +1424,6 @@ static WP<CShader> hkUseShader(CHyprOpenGLImpl *self, WP<CShader> shader) {
   const auto window = effectiveWindowForNativePath(self);
   const auto surface = currentSurfaceForNativePath(self);
   const bool allowNative = shouldUseNativeSurfaceShader(self, window);
-
-  if (allowNative && self && self->m_shaders &&
-      self->m_shaders->frag[SH_FRAG_EXT] &&
-      shader == self->m_shaders->frag[SH_FRAG_EXT]) {
-    if (auto *variant = getNativeExtShaderVariant(self))
-      shader = variant->shader;
-  }
 
   auto usedShader = original(self, shader);
 
@@ -1727,10 +1743,15 @@ public:
   CChromaPassElement(const SChromaData &data) : m_data(data) {}
   virtual ~CChromaPassElement() = default;
 
-  virtual void draw(const CRegion &damage) override;
+  virtual std::vector<UP<IPassElement>> draw() override {
+    drawDirect(renderData().damage);
+    return {};
+  }
+  void drawDirect(const CRegion &damage);
   virtual bool needsLiveBlur() override { return false; }
   virtual bool needsPrecomputeBlur() override { return false; }
   virtual const char *passName() override { return "CChromaPassElement"; }
+  virtual ePassElementType type() override { return EK_CUSTOM; }
   virtual std::optional<CBox> boundingBox() override { return m_data.box; }
 
 private:
@@ -1821,7 +1842,7 @@ static bool composeUnifiedSurface(
   bool success = true;
   for (const auto &surf : data.surfaces) {
     const bool isExternal =
-        (surf.windowTex->m_target == GL_TEXTURE_EXTERNAL_OES);
+        (textureTarget(surf.windowTex) == GL_TEXTURE_EXTERNAL_OES);
     const GLuint prog = isExternal ? g_blitProgram_ext : g_blitProgram;
     if (prog == 0) {
       if (isExternal && !g_loggedUnifiedFallbackNoExternalProgram) {
@@ -1860,14 +1881,14 @@ static bool composeUnifiedSurface(
     glUniform1f(locOpacity, surf.alpha);
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(surf.windowTex->m_target, surf.windowTex->m_texID);
-    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_WRAP_S,
+    glBindTexture(textureTarget(surf.windowTex), surf.windowTex->m_texID);
+    glTexParameteri(textureTarget(surf.windowTex), GL_TEXTURE_WRAP_S,
                     GL_CLAMP_TO_EDGE);
-    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_WRAP_T,
+    glTexParameteri(textureTarget(surf.windowTex), GL_TEXTURE_WRAP_T,
                     GL_CLAMP_TO_EDGE);
-    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_MIN_FILTER,
+    glTexParameteri(textureTarget(surf.windowTex), GL_TEXTURE_MIN_FILTER,
                     data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
-    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_MAG_FILTER,
+    glTexParameteri(textureTarget(surf.windowTex), GL_TEXTURE_MAG_FILTER,
                     data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
     glUniform1i(locWindowTex, 0);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -1924,8 +1945,8 @@ static bool composeUnifiedSurface(
   return true;
 }
 
-void CChromaPassElement::draw(const CRegion &damage) {
-  auto pMonitor = g_pHyprOpenGL->m_renderData.pMonitor.lock();
+void CChromaPassElement::drawDirect(const CRegion &damage) {
+  auto pMonitor = renderData().pMonitor.lock();
   if (!pMonitor)
     return;
 
@@ -2115,7 +2136,7 @@ void CChromaPassElement::draw(const CRegion &damage) {
 
   for (const auto &surf : *surfacesToDraw) {
     const bool isExternal =
-        (surf.windowTex->m_target == GL_TEXTURE_EXTERNAL_OES);
+        (textureTarget(surf.windowTex) == GL_TEXTURE_EXTERNAL_OES);
     const GLuint prog = isExternal ? g_chromaProgram_ext : g_chromaProgram;
     if (prog == 0)
       continue;
@@ -2153,11 +2174,7 @@ void CChromaPassElement::draw(const CRegion &damage) {
     const GLint locDebugVisualize =
         isExternal ? g_loc_ext_debugVisualize : g_loc_debugVisualize;
 
-    const auto matrix =
-        g_pHyprOpenGL->m_renderData.monitorProjection.projectBox(
-            surf.box, HYPRUTILS_TRANSFORM_NORMAL);
-    const auto glMatrix =
-        g_pHyprOpenGL->m_renderData.projection.copy().multiply(matrix);
+    const auto glMatrix = g_pHyprRenderer->projectBoxToTarget(surf.box);
     const auto matData = glMatrix.getMatrix();
 
     glUseProgram(prog);
@@ -2187,14 +2204,14 @@ void CChromaPassElement::draw(const CRegion &damage) {
     glUniform1i(locDebugVisualize, m_data.debugVisualize);
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(surf.windowTex->m_target, surf.windowTex->m_texID);
-    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_WRAP_S,
+    glBindTexture(textureTarget(surf.windowTex), surf.windowTex->m_texID);
+    glTexParameteri(textureTarget(surf.windowTex), GL_TEXTURE_WRAP_S,
                     GL_CLAMP_TO_EDGE);
-    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_WRAP_T,
+    glTexParameteri(textureTarget(surf.windowTex), GL_TEXTURE_WRAP_T,
                     GL_CLAMP_TO_EDGE);
-    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_MIN_FILTER,
+    glTexParameteri(textureTarget(surf.windowTex), GL_TEXTURE_MIN_FILTER,
                     m_data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
-    glTexParameteri(surf.windowTex->m_target, GL_TEXTURE_MAG_FILTER,
+    glTexParameteri(textureTarget(surf.windowTex), GL_TEXTURE_MAG_FILTER,
                     m_data.useNearestNeighbor ? GL_NEAREST : GL_LINEAR);
     glUniform1i(locWindowTex, 0);
 
@@ -2447,7 +2464,7 @@ static void onRenderStage(eRenderStage stage) {
   if (std::chrono::steady_clock::now() < g_suspendUntil)
     return;
 
-  auto window = g_pHyprOpenGL->m_renderData.currentWindow.lock();
+  auto window = renderData().currentWindow.lock();
   if (!window || !isShaded(window))
     return;
 
@@ -2461,7 +2478,7 @@ static void onRenderStage(eRenderStage stage) {
   if (!g_config.enable_on_fullscreen && window->isFullscreen())
     return;
 
-  auto monitor = g_pHyprOpenGL->m_renderData.pMonitor.lock();
+  auto monitor = renderData().pMonitor.lock();
   if (!monitor)
     return;
 
@@ -2480,8 +2497,8 @@ static void onRenderStage(eRenderStage stage) {
   const auto logBox = window->getWindowMainSurfaceBox();
   auto renderOffset = wksp->m_renderOffset->value();
 
-  float windowAlpha =
-      window->m_alpha->value() * window->m_activeInactiveAlpha->value();
+  float windowAlpha = window->alpha(WINDOW_ALPHA_FADE)->value() *
+                      window->alpha(WINDOW_ALPHA_ACTIVE)->value();
 
   CBox overlayBox((logBox.x + renderOffset.x - monitor->m_position.x) * scale,
                   (logBox.y + renderOffset.y - monitor->m_position.y) * scale,
@@ -2491,8 +2508,8 @@ static void onRenderStage(eRenderStage stage) {
   float rPower = window->roundingPower();
 
   // Try v4 path: per-surface luminance tint
-  auto clipBox = g_pHyprOpenGL->m_renderData.clipBox;
-  bool useNearestNeighbor = g_pHyprOpenGL->m_renderData.useNearestNeighbor;
+  auto clipBox = renderData().clipBox;
+  bool useNearestNeighbor = renderData().useNearestNeighbor;
   CChromaPassElement::SChromaData chromaData;
   chromaData.box = overlayBox;
   chromaData.clipBox = clipBox;
@@ -2531,7 +2548,7 @@ static void onRenderStage(eRenderStage stage) {
             if (tex->m_texID == 0)
               return;
 
-            if (tex->m_target == GL_TEXTURE_EXTERNAL_OES &&
+            if (textureTarget(tex) == GL_TEXTURE_EXTERNAL_OES &&
                 g_chromaProgram_ext == 0) {
               if (!g_loggedFallbackNoExternalProgram) {
                 Log::logger->log(
@@ -2573,14 +2590,14 @@ static void onRenderStage(eRenderStage stage) {
             sdata.isRootSurface = isRootSurface;
 
             if (isRootSurface &&
-                g_pHyprOpenGL->m_renderData.primarySurfaceUVTopLeft !=
+                renderData().primarySurfaceUVTopLeft !=
                     Vector2D(-1, -1) &&
-                g_pHyprOpenGL->m_renderData.primarySurfaceUVBottomRight !=
+                renderData().primarySurfaceUVBottomRight !=
                     Vector2D(-1, -1)) {
               sdata.uvTopLeft =
-                  g_pHyprOpenGL->m_renderData.primarySurfaceUVTopLeft;
+                  renderData().primarySurfaceUVTopLeft;
               sdata.uvBottomRight =
-                  g_pHyprOpenGL->m_renderData.primarySurfaceUVBottomRight;
+                  renderData().primarySurfaceUVBottomRight;
             } else if (surface->m_current.viewport.hasSource &&
                        surface->m_current.bufferSize.x > 0.F &&
                        surface->m_current.bufferSize.y > 0.F) {
@@ -2666,7 +2683,7 @@ static void onRenderStage(eRenderStage stage) {
 
         CBorderPassElement::SBorderData border;
         border.box = surf.box;
-        border.grad1 = CGradientValueData(
+        border.grad1 = Config::CGradientValueData(
             surf.isRootSurface ? CHyprColor(0.2f, 1.0f, 0.25f, 1.0f)
                                : CHyprColor(1.0f, 0.65f, 0.15f, 1.0f));
         border.a = 1.0f;
@@ -2705,7 +2722,7 @@ static void onRenderStage(eRenderStage stage) {
 
       CBorderPassElement::SBorderData border;
       border.box = overlayBox;
-      border.grad1 = CGradientValueData(CHyprColor(1.0f, 0.0f, 0.5f, 1.0f));
+      border.grad1 = Config::CGradientValueData(CHyprColor(1.0f, 0.0f, 0.5f, 1.0f));
       border.a = 1.0f;
       border.round = round;
       border.borderSize = std::max(4, (int)std::round(6.F * scale));
@@ -3277,7 +3294,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
                      "darkwindowprobe2");
 
   HyprlandAPI::addNotification(handle,
-                               "[DarkWindow] Registered v3.4.0 "
+                               "[DarkWindow] Registered v3.4.1 "
                                "(Grouped adaptive chromakey tint + guarded "
                                "native surface shader path)",
                                CHyprColor(0.f, 1.f, 0.f, 1.f), 3000);
@@ -3285,7 +3302,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
   logRuntimeProbeReport(initialProbe, false);
 
   return {"DarkWindow", "Grouped adaptive per-pixel chromakey tint", "tco",
-          "3.4.0"};
+          "3.4.1"};
 }
 
 APICALL EXPORT void pluginExit() {
