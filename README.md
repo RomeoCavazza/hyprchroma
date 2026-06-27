@@ -9,8 +9,8 @@
 Hyprchroma is a Hyprland plugin that applies a chromakey effect for global window background transparency without affecting readability.
 
 > [!IMPORTANT]
-> `main` currently targets Hyprland `v0.55.4`. The old rectangle/post-window fallback has been replaced by native surface shader injection through Hyprland's `getShaderVariant` render path, with the adaptive luminance and saturation protection logic kept in the shader.
-> There are currently no release tags or maintenance branches; pin a commit if you need a reproducible setup.
+> `main` and the `v0.55.4` tag target Hyprland `v0.55.4`. The old rectangle/post-window fallback has been replaced by native surface shader injection through Hyprland's `getShaderVariant` render path, with the adaptive luminance and saturation protection logic kept in the shader.
+> Hyprland plugins are ABI-sensitive: pin the matching Hyprland tag, or pin a commit if you need stricter reproducibility.
 
 ## Configuration
 

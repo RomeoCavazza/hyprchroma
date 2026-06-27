@@ -1,43 +1,47 @@
-# Hyprchroma v3.4.0-v054
+# Hyprchroma v0.55.4
 
 ## Highlights
 
-- Ports Hyprchroma to Hyprland `v0.54.2`
-- Ships the grouped adaptive tint pipeline
-- Adds `plugin:darkwindow:suspend_on_workspace_switch_ms`
-- Adds the optional `plugin:darkwindow:unified_window_pass`
-- Adds the guarded `plugin:darkwindow:native_surface_shader_pass`
-- Adds lower-level render-path hardening so the native tint path activates on real-world clients such as Firefox, foot, and VS Code
-- Adds cursor invalidation controls to reduce residual dark trails during hover-heavy redraws
+- Targets Hyprland `v0.55.4`
+- Replaces the old rectangle/post-window fallback with native shader injection through Hyprland's `getShaderVariant` render path
+- Keeps the adaptive luminance and saturation protection logic inside the shader
+- Preserves the historical `plugin:darkwindow:*` configuration keys for compatibility
+- Adds `hyprctl hyprchromaprobe -j` runtime diagnostics for hook and shader-variant coverage
 
-## Why this release exists
+## Why this tag exists
 
-This release consolidates the fork's recent progress into one coherent public version for Hyprland `v0.54.2`.
+Hyprland plugins are ABI-sensitive, so this repository now uses a Hyprland-aligned tag for the public build.
 
-The original upstream plugin targets an older rendering path. This fork keeps the same project identity, but reworks the internals for the modern Hyprland render API and a more precise adaptive tint pipeline.
-
-The biggest recent step is the guarded native surface shader path, which moves the tint logic closer to Hyprland's own surface rendering. The final hardening work also resolves real render-path coverage on Hyprland `v0.54.2`, adds runtime diagnostics, and greatly reduces cursor-induced dark trails on complex dark UIs.
+The `v0.55.4` tag marks the first Hyprchroma version where the tint path is fully native to Hyprland's `v0.55.4` surface shader pipeline. It avoids the old fallback rectangle approach, which could drift during workspace transitions and conflict with other render-path plugins.
 
 ## Main config knobs
 
 ```conf
-plugin:darkwindow:suspend_on_workspace_switch_ms = 150
-plugin:darkwindow:unified_window_pass = 0
-plugin:darkwindow:native_surface_shader_pass = 1
-plugin:darkwindow:cursor_invalidation_mode = 1
-```
+plugin:darkwindow:tint_r        = 0.20
+plugin:darkwindow:tint_g        = 0.70
+plugin:darkwindow:tint_b        = 1.00
+plugin:darkwindow:tint_strength = 0.040
 
-Set any of them to `0` to disable the corresponding behavior.
+plugin:darkwindow:protect_brights      = 1.00
+plugin:darkwindow:protect_saturated    = 0.85
+plugin:darkwindow:enable_on_fullscreen = 1
+plugin:darkwindow:tint_all_surfaces    = 1
+```
 
 ## Compatibility
 
-- Target Hyprland: `v0.54.2`
-- Existing `plugin:darkwindow:*` settings remain compatible with the forked implementation
+- Target Hyprland: `v0.55.4`
+- Runtime plugin version: `4.0.0-v055-native`
+- Existing `plugin:darkwindow:*` settings remain compatible with this fork
 
 ## Local verification
 
 Recent local verification used:
 
-`nix build /etc/nixos#nixosConfigurations.nixos.config.system.build.toplevel --no-link -L`
+```sh
+nix build --no-link --print-out-paths .#hyprchroma
+nix build --no-link --print-out-paths /etc/nixos#nixosConfigurations.nixos.config.system.build.toplevel
+hyprctl hyprchromaprobe -j
+```
 
-Result: passes with the current Hyprchroma fork integrated into the NixOS build.
+Result: the NixOS system build passes, the plugin loads through Home Manager, and the runtime probe reports compiled native shader variants with zero failed variants.
