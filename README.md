@@ -51,10 +51,6 @@ hyprctl hyprchromaprobe -j
 
 ## Installation
 
-### Hyprland v0.55.4
-
-This fork currently targets Hyprland `v0.55.4`.
-
 ### Nix
 
 ```nix
@@ -66,7 +62,7 @@ wayland.windowManager.hyprland.plugins = [
 ```
 
 > [!NOTE]
-> Hyprland plugins are ABI-sensitive. Make sure the Hyprland headers used to build Hyprchroma match the Hyprland version that loads it.
+> Hyprland plugins are ABI-sensitive. Make sure the Hyprland headers used to build Hyprchroma match the Hyprland version that loads it. This fork currently targets Hyprland `v0.55.4`.
 
 ### Hyprpm
 
