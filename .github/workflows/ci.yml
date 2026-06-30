@@ -25,6 +25,3 @@ jobs:
 
       - name: Check flake
         run: nix flake check -L
-
-      - name: Build plugin
-        run: nix build -L
