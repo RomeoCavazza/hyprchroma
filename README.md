@@ -1,5 +1,6 @@
 # Hyprchroma
 
+[![CI](https://github.com/RomeoCavazza/hyprchroma/actions/workflows/ci.yml/badge.svg)](https://github.com/RomeoCavazza/hyprchroma/actions/workflows/ci.yml)
 [![Build](https://github.com/RomeoCavazza/hyprchroma/actions/workflows/build.yml/badge.svg)](https://github.com/RomeoCavazza/hyprchroma/actions/workflows/build.yml)
 [![Release](https://github.com/RomeoCavazza/hyprchroma/actions/workflows/release.yml/badge.svg)](https://github.com/RomeoCavazza/hyprchroma/actions/workflows/release.yml)
 [![Hyprland](https://img.shields.io/badge/Hyprland-v0.55.4-58E1FF)](https://github.com/hyprwm/Hyprland/releases/tag/v0.55.4)
