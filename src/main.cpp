@@ -775,10 +775,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
                      return format == FORMAT_JSON ? probeJson() : probeText();
                    }});
 
-  HyprlandAPI::addNotification(
-      handle, "[Hyprchroma] Native surface shader path loaded",
-      CHyprColor(0.15f, 0.9f, 0.25f, 1.f), 3000);
-
   return {"DarkWindow", "Native adaptive per-pixel surface tint", "tco",
           "4.0.0-v055-native"};
 }
