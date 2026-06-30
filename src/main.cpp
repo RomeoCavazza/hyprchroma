@@ -1,9 +1,4 @@
-// libhyprchroma.so - Hyprchroma native surface shader for Hyprland v0.55.x
-//
-// This rewrite intentionally avoids post-window overlays. It injects the
-// adaptive tint into Hyprland's own surface shader variants, so geometry,
-// clipping, workspace animation, render modifiers, UVs, rounding, blur and
-// damage tracking stay owned by Hyprland.
+// --- Hyprchroma Shader Plugin ---
 
 #include <algorithm>
 #include <any>
@@ -700,8 +695,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
   HyprlandAPI::addConfigValue(handle, "plugin:darkwindow:tint_all_surfaces",
                               Hyprlang::INT{1});
 
-  // Accepted for compatibility with existing configs. The native shader path is
-  // always used in this rewrite.
+  // Backward-compatible key for existing configs.
   HyprlandAPI::addConfigValue(handle,
                               "plugin:darkwindow:native_surface_shader_pass",
                               Hyprlang::INT{1});
